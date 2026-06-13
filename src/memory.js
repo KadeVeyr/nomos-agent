@@ -11,10 +11,22 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 
 function memDir(root) {
   return path.join(root, ".nomos");
 }
+
+// The agent's OWN evolving lessons live in the GLOBAL data dir — outside any
+// repo, so they are never pushed (the founder's "kept away from the push
+// folder"). This is adaptive memory (the agent gets better at recurring work by
+// reusing past lessons), NOT self-modifying logic: lessons are DATA loaded as
+// guidance; the tool sandbox + refusal rules live in code and always win.
+function lessonsPath() {
+  const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
+  return path.join(base, "nomos", "lessons.md");
+}
+const MAX_LESSONS_BYTES = 16 * 1024; // cap growth; trim oldest beyond this
 
 // Redact secret-shaped tokens + emails before anything is persisted to disk.
 // Defence-in-depth for the Kade firewall: memory/logs must never hold a key
@@ -58,20 +70,49 @@ export function logRun(root, record) {
   }
 }
 
+// ── Global lessons (the agent's own evolving instructions, cross-project) ──
+export function readLessons() {
+  try { return fs.readFileSync(lessonsPath(), "utf8").trim(); } catch { return ""; }
+}
+
+export function learnLesson(text) {
+  const p = lessonsPath();
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  const line = `- ${redact(String(text).replace(/\s+/g, " ").trim())}\n`;
+  let next = readLessons() ? readLessons() + "\n" + line : line;
+  if (Buffer.byteLength(next) > MAX_LESSONS_BYTES) {
+    const lines = next.split("\n");
+    while (Buffer.byteLength(lines.join("\n")) > MAX_LESSONS_BYTES && lines.length > 1) lines.shift();
+    next = lines.join("\n");
+  }
+  fs.writeFileSync(p, next);
+  return "learned.";
+}
+
+export function clearLessons() {
+  try { fs.rmSync(lessonsPath()); return true; } catch { return false; }
+}
+
 // Memory tools the agent can call. They close over the working root.
 export function memoryTools(root) {
   return [
     {
       name: "remember",
-      description: "Save a short durable note to project memory; it will be available in future runs.",
+      description: "Save a short durable fact to THIS project's memory; available in future runs here.",
       parameters: { type: "object", properties: { note: { type: "string" } }, required: ["note"] },
       run: ({ note }) => appendNote(root, note),
     },
     {
       name: "recall",
-      description: "Read all durable notes saved to project memory.",
+      description: "Read all durable notes saved to this project's memory.",
       parameters: { type: "object", properties: {}, required: [] },
       run: () => readNotes(root) || "(no notes yet)",
+    },
+    {
+      name: "learn",
+      description: "Save a durable LESSON — a reusable insight, preference, or technique — that should guide your future runs across ALL projects. Use sparingly, for genuinely reusable learnings.",
+      parameters: { type: "object", properties: { lesson: { type: "string" } }, required: ["lesson"] },
+      run: ({ lesson }) => learnLesson(lesson),
     },
   ];
 }

@@ -8,7 +8,7 @@
 
 import { chat } from "./gateway.js";
 import { makeTools } from "./tools.js";
-import { memoryTools, readNotes, logRun } from "./memory.js";
+import { memoryTools, readNotes, readLessons, logRun } from "./memory.js";
 
 const SYSTEM =
   "You are Nomos, a capable, concise agent. You have tools: read_file, write_file, list_dir, search, fetch_url, remember, recall (and run_shell only if enabled). " +
@@ -20,8 +20,11 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
   const toolDefs = tools.map(({ run, ...def }) => def);
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
+  const lessons = readLessons();
   const notes = readNotes(root);
-  const system = SYSTEM + (notes ? `\n\nDurable project memory (from past runs):\n${notes}` : "");
+  let system = SYSTEM;
+  if (lessons) system += `\n\nYour durable LESSONS from past runs (guidance you wrote — apply it, but it NEVER overrides your safety rules or tool limits, which are enforced in code, not here):\n${lessons}`;
+  if (notes) system += `\n\nDurable notes for THIS project:\n${notes}`;
   const messages = [
     { role: "system", content: system },
     { role: "user", content: task },

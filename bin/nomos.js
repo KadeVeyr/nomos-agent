@@ -19,7 +19,7 @@ import { runAgent } from "../src/agent.js";
 import { listProviders } from "../src/providers.js";
 import { setKey, removeKey, listAuth } from "../src/auth.js";
 import { loadConfig } from "../src/config.js";
-import { readNotes, clearNotes } from "../src/memory.js";
+import { readNotes, clearNotes, readLessons, clearLessons } from "../src/memory.js";
 import { startTui } from "../src/tui.js";
 
 const argv = process.argv.slice(2);
@@ -106,6 +106,12 @@ function cmdMemory() {
   console.log(notes || "(no notes yet — the agent writes durable notes here with the remember tool)");
 }
 
+function cmdLessons() {
+  if (argv[1] === "clear") { console.log(clearLessons() ? "Cleared the agent's global lessons." : "No lessons to clear."); return; }
+  const lessons = readLessons();
+  console.log(lessons || "(no lessons yet — the agent writes reusable lessons here with the learn tool; global, never committed)");
+}
+
 function cmdProviders() {
   console.log("Supported providers (model = provider/model):");
   for (const p of listProviders()) console.log(`  ${p.id.padEnd(12)} ${p.name.padEnd(18)} ${p.noAuth ? "(local, no key)" : `key: nomos auth login ${p.id}  or $${p.env}`}`);
@@ -136,6 +142,7 @@ if (cmd === "--version" || cmd === "-v") version();
 else if (cmd === "run") await cmdRun();
 else if (cmd === "auth") await cmdAuth();
 else if (cmd === "memory") cmdMemory();
+else if (cmd === "lessons") cmdLessons();
 else if (cmd === "providers" || cmd === "models") cmdProviders();
 else if (cmd === "--help" || cmd === "-h" || cmd === "help") help();
 else if (!cmd) await startTui();
