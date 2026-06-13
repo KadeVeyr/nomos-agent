@@ -10,6 +10,7 @@ import { resolveModel } from "./providers.js";
 import { getKey } from "./auth.js";
 
 function authHeaders(provider, key) {
+  if (provider.noAuth || !key) return { "content-type": "application/json" };
   if (provider.format === "anthropic-messages") {
     return { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" };
   }
@@ -42,7 +43,7 @@ function safeError(res) {
 export async function chat({ spec, messages, tools, signal }) {
   const { providerId, model, provider } = resolveModel(spec);
   const key = getKey(providerId);
-  if (!key) {
+  if (!key && !provider.noAuth) {
     throw new Error(`No credential for "${providerId}". Run: nomos auth login ${providerId}`);
   }
 

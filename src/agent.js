@@ -1,65 +1,47 @@
-// Agent loop — task → model → (tool calls) → result → model → final answer.
+// Agent loop — reason → act → observe → repeat, until done or step-capped.
 //
-// v0 ships ONE real tool: a sandboxed arithmetic calculator. It uses a tiny
-// recursive-descent parser, NOT eval — no arbitrary code, no filesystem, no
-// network (Kimi tool-sandbox rule). The loop is provider-neutral: the same
-// agent runs against any provider in the registry. This is what makes Nomos a
-// harness and not a chatbot — it routes tools through a verifiable loop.
+// Robust: a tool error is caught and fed back to the model as the tool result,
+// so the agent can recover and try another approach rather than crashing. The
+// loop ends when the model returns a final answer (no tool calls). It loads the
+// project's durable memory into context at the start, so it remembers across
+// sessions. Same loop powers headless `run` and the TUI — one code path.
 
 import { chat } from "./gateway.js";
+import { makeTools } from "./tools.js";
+import { memoryTools, readNotes, logRun } from "./memory.js";
 
-// ── Safe calculator (no eval) ──────────────────────────────────────────────
-function calc(expr) {
-  let i = 0;
-  const s = String(expr).replace(/\s+/g, "");
-  if (!/^[0-9+\-*/().]+$/.test(s)) throw new Error("Only numbers and + - * / ( ) are allowed.");
-  function peek() { return s[i]; }
-  function num() {
-    let start = i;
-    while (i < s.length && /[0-9.]/.test(s[i])) i++;
-    const n = Number(s.slice(start, i));
-    if (Number.isNaN(n)) throw new Error("Bad number.");
-    return n;
-  }
-  function factor() {
-    if (peek() === "(") { i++; const v = expr2(); if (peek() !== ")") throw new Error("Missing )."); i++; return v; }
-    if (peek() === "-") { i++; return -factor(); }
-    return num();
-  }
-  function term() { let v = factor(); while (peek() === "*" || peek() === "/") { const op = s[i++]; const r = factor(); v = op === "*" ? v * r : v / r; } return v; }
-  function expr2() { let v = term(); while (peek() === "+" || peek() === "-") { const op = s[i++]; const r = term(); v = op === "+" ? v + r : v - r; } return v; }
-  const result = expr2();
-  if (i !== s.length) throw new Error("Unexpected character.");
-  return result;
-}
+const SYSTEM =
+  "You are Nomos, a capable, concise agent. You have tools: read_file, write_file, list_dir, search, fetch_url, remember, recall (and run_shell only if enabled). " +
+  "Use tools to gather facts and act, rather than guessing. File and shell tools are confined to the working directory; secret files are blocked. " +
+  "When the task is complete, give a short final answer with no tool call. Save anything worth remembering across sessions with the remember tool.";
 
-export const TOOLS = [
-  {
-    name: "calculator",
-    description: "Evaluate a basic arithmetic expression using + - * / and parentheses. Use for any exact arithmetic.",
-    parameters: { type: "object", properties: { expression: { type: "string", description: "e.g. (12+5)*3" } }, required: ["expression"] },
-    run: ({ expression }) => String(calc(expression)),
-  },
-];
+export async function runAgent({ spec, task, root = process.cwd(), allowShell = false, allowFetch = false, maxSteps = 12, onEvent = () => {}, signal }) {
+  const tools = [...makeTools({ root, allowShell, allowFetch }), ...memoryTools(root)];
+  const toolDefs = tools.map(({ run, ...def }) => def);
+  const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
 
-const SYSTEM = "You are Nomos, a concise agent. When a task needs exact arithmetic, call the calculator tool rather than computing in your head. Answer directly and briefly.";
-
-// Run one task to completion. Emits events via onEvent for streaming UIs.
-// Returns the final assistant text.
-export async function runAgent({ spec, task, onEvent = () => {}, maxSteps = 6, signal }) {
-  const toolDefs = TOOLS.map(({ run, ...def }) => def);
-  const byName = Object.fromEntries(TOOLS.map((t) => [t.name, t]));
+  const notes = readNotes(root);
+  const system = SYSTEM + (notes ? `\n\nDurable project memory (from past runs):\n${notes}` : "");
   const messages = [
-    { role: "system", content: SYSTEM },
+    { role: "system", content: system },
     { role: "user", content: task },
   ];
 
+  let finalText = "";
   for (let step = 0; step < maxSteps; step++) {
-    const { content, toolCalls } = await chat({ spec, messages, tools: toolDefs, signal });
+    let res;
+    try {
+      res = await chat({ spec, messages, tools: toolDefs, signal });
+    } catch (e) {
+      onEvent({ type: "error", message: e.message });
+      throw e;
+    }
+    const { content, toolCalls } = res;
     if (content) onEvent({ type: "text", text: content });
 
     if (!toolCalls || toolCalls.length === 0) {
-      return content;
+      finalText = content || "";
+      break;
     }
 
     messages.push({ role: "assistant", content, toolCalls });
@@ -68,13 +50,21 @@ export async function runAgent({ spec, task, onEvent = () => {}, maxSteps = 6, s
       let result;
       try {
         const tool = byName[call.name];
-        result = tool ? await tool.run(call.args) : `Unknown tool: ${call.name}`;
+        // Validate required args before running.
+        const req = tool?.parameters?.required || [];
+        const missing = req.filter((k) => call.args == null || call.args[k] === undefined);
+        if (!tool) result = `Unknown tool: ${call.name}`;
+        else if (missing.length) result = `Missing required argument(s): ${missing.join(", ")}`;
+        else result = await tool.run(call.args || {});
       } catch (e) {
-        result = `Tool error: ${e.message}`;
+        result = `Tool error: ${e.message}`; // recover: the model sees the error and can adapt
       }
-      onEvent({ type: "tool_result", name: call.name, result });
-      messages.push({ role: "tool", toolCallId: call.id, content: result });
+      onEvent({ type: "tool_result", name: call.name, result: String(result).slice(0, 600) });
+      messages.push({ role: "tool", toolCallId: call.id, content: String(result) });
     }
+    if (step === maxSteps - 1) finalText = content || "[nomos] Reached the step limit without a final answer.";
   }
-  return "[nomos] Reached the step limit without a final answer.";
+
+  logRun(root, { task, model: spec, result: finalText.slice(0, 2000), turns: messages.length });
+  return finalText;
 }

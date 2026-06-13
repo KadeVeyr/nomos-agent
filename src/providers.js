@@ -48,6 +48,28 @@ export const PROVIDERS = {
     env: "OPENROUTER_API_KEY",
     keyHint: "sk-or-…",
   },
+  zai: {
+    name: "Z.ai (GLM)",
+    base: "https://api.z.ai/api/paas/v4",
+    format: "openai-chat",
+    env: "ZAI_API_KEY",
+    keyHint: "…",
+  },
+  dashscope: {
+    name: "DashScope (Qwen)",
+    base: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    format: "openai-chat",
+    env: "DASHSCOPE_API_KEY",
+    keyHint: "sk-…",
+  },
+  ollama: {
+    name: "Ollama (local)",
+    base: "http://localhost:11434/v1",
+    format: "openai-chat",
+    env: "OLLAMA_API_KEY",
+    keyHint: "(none — local)",
+    noAuth: true, // local server; no credential required
+  },
 };
 
 // Split "provider/model" into { providerId, model, provider }.

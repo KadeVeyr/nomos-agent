@@ -5,6 +5,12 @@ auth.json
 *.key
 *.pem
 
+# Per-project memory + session logs — local only, never committed (Kade firewall).
+.nomos/
+
+# Per-project config is capability-bearing — review before committing.
+nomos.json
+
 # Node
 node_modules/
 npm-debug.log*

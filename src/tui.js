@@ -6,10 +6,12 @@ import readline from "node:readline";
 import process from "node:process";
 import { runAgent } from "./agent.js";
 import { listAuth } from "./auth.js";
+import { loadConfig } from "./config.js";
 
 const C = { dim: "\x1b[2m", b: "\x1b[1m", g: "\x1b[32m", y: "\x1b[33m", r: "\x1b[0m" };
 
 export async function startTui() {
+  const cfg = loadConfig();
   const configured = listAuth().filter((a) => a.configured);
   process.stdout.write(`\n${C.b}NOMOS${C.r} ${C.dim}v0.1 — the headless agent you call from your editor${C.r}\n`);
 
@@ -38,6 +40,10 @@ export async function startTui() {
       const final = await runAgent({
         spec,
         task,
+        root: cfg.root,
+        allowShell: cfg.allowShell,
+        allowFetch: cfg.allowFetch,
+        maxSteps: cfg.maxSteps,
         onEvent: (e) => {
           if (e.type === "tool_call") process.stdout.write(`${C.dim}· calculator(${JSON.stringify(e.args)})${C.r}\n`);
           else if (e.type === "tool_result") process.stdout.write(`${C.dim}· = ${e.result}${C.r}\n`);
