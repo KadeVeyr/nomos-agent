@@ -75,15 +75,16 @@ export async function startTui() {
         continue;
       }
       try {
-        const final = await runAgent({
+        await runAgent({
           spec, task, root: cfg.root,
           allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, maxSteps: cfg.maxSteps,
           onEvent: (e) => {
-            if (e.type === "tool_call") out(`${C.dim}· ${e.name}(${JSON.stringify(e.args)})${C.r}\n`);
-            else if (e.type === "tool_result") out(`${C.dim}· → ${String(e.result).slice(0, 160)}${C.r}\n`);
+            if (e.type === "delta") out(e.text);
+            else if (e.type === "tool_call") out(`\n${C.dim}· ${e.name}(${JSON.stringify(e.args)})${C.r}\n`);
+            else if (e.type === "tool_result") out(`${C.dim}· → ${String(e.result).replace(/\n/g, " ⏎ ").slice(0, 160)}${C.r}\n`);
           },
         });
-        out(`\n${(final || "").trim()}\n`);
+        out(`\n`); // streamed deltas already printed the answer
       } catch (e) {
         out(`${C.y}error:${C.r} ${e.message}\n`);
       }

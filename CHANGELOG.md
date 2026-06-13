@@ -4,6 +4,14 @@ All notable changes to Nomos. Working toward v1.0.
 
 ## [Unreleased]
 
+## [0.4.0] — Streaming & feel
+*Planned via 3 rounds (deepseek-flash + deepseek-pro both ranked streaming #1: "blank line = dead product"); live-tested.*
+- **Token-by-token streaming** (`nomos run` + TUI) — `chatStream` parses SSE for both Anthropic and OpenAI wire formats and prints the answer as it arrives. Falls back cleanly to non-streaming if a provider can't stream.
+- **Live tool-call status** — `· read_file(...)` shows the instant the model decides, not after the tool returns.
+- **Elapsed time** — `·· 4.4s` after each run, so a wait never feels infinite.
+- `--json` keeps stdout clean (no deltas; structured object only).
+- **Live-tested:** explanation streamed token-by-token after parallel file reads.
+
 ## [0.3.0] — Agent-loop robustness
 *Planned via 3 rounds (deepseek-flash + mimo converged on these exact gaps); live-tested.*
 - **Transient-error retry** — 429 / 5xx / network errors retry with exponential backoff + jitter, honoring `Retry-After`. A single hiccup no longer kills a session. Aborts (cancellation) are never retried.

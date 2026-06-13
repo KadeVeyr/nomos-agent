@@ -8,7 +8,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { chat } from "./gateway.js";
+import { chat, chatStream } from "./gateway.js";
 import { makeTools } from "./tools.js";
 import { memoryTools, readNotes, readLessons, logRun } from "./memory.js";
 
@@ -69,17 +69,28 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
   ];
 
   let finalText = "";
+  let streamOk = true; // fall back to non-streaming if a provider can't stream
   for (let step = 0; step < maxSteps; step++) {
     trimContext(messages); // bound context growth on long runs
     let res;
     try {
-      res = await chat({ spec, messages, tools: toolDefs, signal });
+      if (streamOk) {
+        res = await chatStream({ spec, messages, tools: toolDefs, signal, onDelta: (t) => onEvent({ type: "delta", text: t }) });
+      } else {
+        res = await chat({ spec, messages, tools: toolDefs, signal });
+        if (res.content) onEvent({ type: "delta", text: res.content });
+      }
     } catch (e) {
-      onEvent({ type: "error", message: e.message });
-      throw e;
+      if (e?.name === "AbortError") throw e;
+      if (streamOk) { // streaming failed once — drop to non-stream for the rest of this run
+        streamOk = false;
+        try {
+          res = await chat({ spec, messages, tools: toolDefs, signal });
+          if (res.content) onEvent({ type: "delta", text: res.content });
+        } catch (e2) { onEvent({ type: "error", message: e2.message }); throw e2; }
+      } else { onEvent({ type: "error", message: e.message }); throw e; }
     }
     const { content, toolCalls } = res;
-    if (content) onEvent({ type: "text", text: content });
 
     if (!toolCalls || toolCalls.length === 0) {
       finalText = content || "";

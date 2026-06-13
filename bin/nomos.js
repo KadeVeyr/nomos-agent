@@ -69,16 +69,19 @@ async function cmdRun() {
   if (!spec) return fail('No model. Use -m provider/model, or set defaultModel in nomos.json.');
   if (!task) return fail('Missing task. Usage: nomos run -m provider/model "task"');
 
+  const t0 = Date.now();
   const onEvent = (e) => {
-    if (e.type === "tool_call") process.stderr.write(`\x1b[2m· ${e.name}(${JSON.stringify(e.args)})\x1b[0m\n`);
-    else if (e.type === "tool_result") process.stderr.write(`\x1b[2m· → ${e.result.replace(/\n/g, " ⏎ ").slice(0, 160)}\x1b[0m\n`);
+    if (e.type === "delta") { if (!json) process.stdout.write(e.text); }
+    else if (e.type === "tool_call") process.stderr.write(`\n\x1b[2m· ${e.name}(${JSON.stringify(e.args)})\x1b[0m\n`);
+    else if (e.type === "tool_result") process.stderr.write(`\x1b[2m· → ${String(e.result).replace(/\n/g, " ⏎ ").slice(0, 160)}\x1b[0m\n`);
     else if (e.type === "error") process.stderr.write(`\x1b[31m· error: ${e.message}\x1b[0m\n`);
   };
 
   try {
     const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, maxSteps: cfg.maxSteps, onEvent });
     if (json) process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim() }) + "\n");
-    else process.stdout.write((result || "").trim() + "\n");
+    else process.stdout.write("\n"); // the streamed deltas already printed the answer
+    process.stderr.write(`\x1b[2m·· ${((Date.now() - t0) / 1000).toFixed(1)}s\x1b[0m\n`);
   } catch (e) {
     if (json) { process.stdout.write(JSON.stringify({ ok: false, model: spec, error: e.message }) + "\n"); process.exitCode = 1; }
     else fail(e.message);
