@@ -1,7 +1,7 @@
 {
   "name": "nomos-agent",
-  "version": "0.6.0",
-  "description": "The headless agent you call from your editor. Bring your own subscriptions.",
+  "version": "1.0.0",
+  "description": "A coding agent for your terminal. Bring your own model.",
   "type": "module",
   "bin": {
     "nomos": "bin/nomos.js"

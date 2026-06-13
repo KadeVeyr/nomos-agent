@@ -4,6 +4,14 @@ All notable changes to Nomos. Working toward v1.0.
 
 ## [Unreleased]
 
+## [1.0.0] — First stable release
+A real terminal coding agent: explore → surgical edit → verify, streaming, on your own models.
+- Verified on real tasks (off-by-one fix, multi-file rename, feature + test add) — correct, build-passing edits, end to end.
+- Full surface: 9 tools, parallel tool calls, retry, context trimming, streaming, clean UX, 13 providers, headless seat-runner, cross-provider receipts.
+- **22 automated tests** (`npm test`), zero runtime dependencies.
+- README rewritten to position Nomos as a coding agent (OpenCode / Claude Code / Hermes category).
+- Built across rounds v0.2–v0.6, each planned by a 3-question council (what's next / how to improve / what the others do), live-tested, and changelogged.
+
 ## [0.6.0] — Reliability & tests
 *Planned via 3 rounds (both seats ranked a test suite + the SSE parser as the critical risks); built.*
 - **22 automated tests** (`npm test`, zero-dep `node --test`): tools (edit/multi_edit/glob/regex-search/read-offset), **path confinement + secret denylist**, gateway routing (anthropic vs bearer vs noAuth), model parsing, **SSE stream parser** (content split across chunks, malformed frames skipped, tool-use assembled across deltas — both wire formats), seat/receipt/council verdict + tamper hash, credential store (no value leak), context trimming.
