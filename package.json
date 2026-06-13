@@ -1,13 +1,14 @@
 {
   "name": "nomos-agent",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "The headless agent you call from your editor. Bring your own subscriptions.",
   "type": "module",
   "bin": {
     "nomos": "bin/nomos.js"
   },
   "scripts": {
-    "start": "node bin/nomos.js"
+    "start": "node bin/nomos.js",
+    "test": "node --test test/tools.test.mjs test/core.test.mjs test/auth.test.mjs test/stream.test.mjs"
   },
   "engines": {
     "node": ">=18"

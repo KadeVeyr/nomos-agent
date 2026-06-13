@@ -4,6 +4,11 @@ All notable changes to Nomos. Working toward v1.0.
 
 ## [Unreleased]
 
+## [0.6.0] — Reliability & tests
+*Planned via 3 rounds (both seats ranked a test suite + the SSE parser as the critical risks); built.*
+- **22 automated tests** (`npm test`, zero-dep `node --test`): tools (edit/multi_edit/glob/regex-search/read-offset), **path confinement + secret denylist**, gateway routing (anthropic vs bearer vs noAuth), model parsing, **SSE stream parser** (content split across chunks, malformed frames skipped, tool-use assembled across deltas — both wire formats), seat/receipt/council verdict + tamper hash, credential store (no value leak), context trimming.
+- The SSE parser — flagged by the council as the protocol single-point-of-failure — is now covered for split-chunk and malformed-frame cases.
+
 ## [0.5.0] — UX (user-seat: Haiku)
 *A Haiku user-seat gave a first-time-user reaction; these are its top fixes, built.*
 - **Run header** — `▸ model · /working/dir · shell on` so you always know what's running and where.

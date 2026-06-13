@@ -15,7 +15,7 @@ import { memoryTools, readNotes, readLessons, logRun } from "./memory.js";
 // Keep context bounded on long runs: when the transcript exceeds a char budget,
 // truncate the OLDEST tool observations (least relevant late in a run). The
 // model keeps its reasoning + recent results; old raw file dumps get summarised.
-function trimContext(messages, maxChars = 150000) {
+export function trimContext(messages, maxChars = 150000) {
   let total = 0;
   for (const m of messages) total += m.content ? m.content.length : 0;
   if (total <= maxChars) return;
