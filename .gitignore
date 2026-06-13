@@ -1,0 +1,15 @@
+# Secrets must NEVER enter the repo. Keys live in ~/.local/share/nomos/auth.json.
+auth.json
+.env
+.env.*
+*.key
+*.pem
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
