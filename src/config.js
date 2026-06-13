@@ -20,9 +20,13 @@ const DEFAULTS = {
   defaultModel: null,
   allowShell: false,
   allowFetch: false,
-  maxSteps: 12,
+  maxSteps: 30, // real coding tasks need many explore→edit→verify iterations
 };
-const CAPABILITY_KEYS = ["allowShell", "allowFetch"];
+// Keys a repo-controlled project nomos.json may NOT set: capability flags
+// (would grant shell/network) AND defaultModel — a cloned repo must not get to
+// silently choose which provider your task + code + tool transcript egress to.
+// These come only from the user's global config, env, or an explicit CLI flag.
+const PROJECT_FORBIDDEN_KEYS = ["allowShell", "allowFetch", "defaultModel"];
 
 function readJson(p) {
   try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; }
@@ -34,8 +38,8 @@ export function loadConfig({ root = process.cwd(), cli = {} } = {}) {
 
   const global = readJson(globalPath);
   const project = readJson(projectPath);
-  // Strip capability flags from the (repo-controlled) project file.
-  for (const k of CAPABILITY_KEYS) delete project[k];
+  // Strip capability + egress keys from the (repo-controlled) project file.
+  for (const k of PROJECT_FORBIDDEN_KEYS) delete project[k];
 
   const env = {};
   if (process.env.NOMOS_MODEL) env.defaultModel = process.env.NOMOS_MODEL;

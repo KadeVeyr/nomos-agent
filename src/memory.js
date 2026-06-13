@@ -6,8 +6,8 @@
 // The agent loads notes.md into its context at the start of every run, so it
 // "remembers across sessions." It never executes memory — memory is data.
 //
-// KADE FIREWALL: `.nomos/` is gitignored by default (see README/init). Memory
-// and logs must never be committed into a public repo.
+// PRIVACY: `.nomos/` is gitignored by default (see README/init). Memory and
+// logs must never be committed into a public repo.
 
 import fs from "node:fs";
 import path from "node:path";
@@ -18,10 +18,10 @@ function memDir(root) {
 }
 
 // The agent's OWN evolving lessons live in the GLOBAL data dir — outside any
-// repo, so they are never pushed (the founder's "kept away from the push
-// folder"). This is adaptive memory (the agent gets better at recurring work by
-// reusing past lessons), NOT self-modifying logic: lessons are DATA loaded as
-// guidance; the tool sandbox + refusal rules live in code and always win.
+// repo, so they are never pushed. This is adaptive memory (the agent gets
+// better at recurring work by reusing past lessons), NOT self-modifying logic:
+// lessons are DATA loaded as guidance; the tool sandbox + refusal rules live in
+// code and always win.
 function lessonsPath() {
   const base = process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share");
   return path.join(base, "nomos", "lessons.md");
@@ -29,8 +29,8 @@ function lessonsPath() {
 const MAX_LESSONS_BYTES = 16 * 1024; // cap growth; trim oldest beyond this
 
 // Redact secret-shaped tokens + emails before anything is persisted to disk.
-// Defence-in-depth for the Kade firewall: memory/logs must never hold a key
-// or an identifying email, even if one reaches the agent's context.
+// Defence-in-depth: memory/logs must never hold a key or an identifying email,
+// even if one reaches the agent's context.
 const SECRET = /\b(sk-[A-Za-z0-9_-]{12,}|sk-ant-[A-Za-z0-9_-]{12,}|gsk_[A-Za-z0-9]{12,}|sk-or-[A-Za-z0-9_-]{12,}|Bearer\s+[A-Za-z0-9._-]+|[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}|[A-Fa-f0-9]{40,})\b/g;
 function redact(s) {
   return String(s).replace(SECRET, "[redacted]");
@@ -38,7 +38,10 @@ function redact(s) {
 
 export function readNotes(root) {
   try {
-    return fs.readFileSync(path.join(memDir(root), "notes.md"), "utf8").trim();
+    // Redact on READ too (not just on write): if a secret reached the file via a
+    // manual edit or an older version, it must not be injected into a provider
+    // prompt or printed by `nomos memory`. Defence-in-depth.
+    return redact(fs.readFileSync(path.join(memDir(root), "notes.md"), "utf8").trim());
   } catch {
     return "";
   }
@@ -72,7 +75,7 @@ export function logRun(root, record) {
 
 // ── Global lessons (the agent's own evolving instructions, cross-project) ──
 export function readLessons() {
-  try { return fs.readFileSync(lessonsPath(), "utf8").trim(); } catch { return ""; }
+  try { return redact(fs.readFileSync(lessonsPath(), "utf8").trim()); } catch { return ""; }
 }
 
 export function learnLesson(text) {

@@ -101,15 +101,53 @@ async function guardUrl(raw) {
   return u;
 }
 
+// Convert a glob (*, **, ?) to an anchored RegExp matching forward-slash paths.
+function globToRegExp(glob) {
+  let re = "^";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*") {
+      if (glob[i + 1] === "*") { re += ".*"; i++; if (glob[i + 1] === "/") i++; }
+      else re += "[^/]*";
+    } else if (c === "?") re += "[^/]";
+    else if (".+^${}()|[]\\".includes(c)) re += "\\" + c;
+    else re += c;
+  }
+  return new RegExp(re + "$");
+}
+
+// Walk files under root (skipping node_modules/.git/symlinks/denied), call cb(absPath).
+function walkFiles(rootReal, cb, cap = 5000) {
+  let n = 0;
+  const walk = (dir) => {
+    for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (n >= cap) return;
+      if (d.isSymbolicLink()) continue;
+      const abs = path.join(dir, d.name);
+      if (denied(abs)) continue;
+      if (d.isDirectory()) { if (d.name !== "node_modules" && d.name !== ".git" && d.name !== ".nomos") walk(abs); continue; }
+      n++; cb(abs);
+    }
+  };
+  walk(rootReal);
+}
+
 export function makeTools({ root = process.cwd(), allowShell = false, allowFetch = false } = {}) {
   const defs = [
     {
       name: "read_file",
-      description: "Read a UTF-8 text file inside the working directory.",
-      parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-      run: ({ path: p }) => {
+      description: "Read a UTF-8 text file inside the working directory. Optional offset (1-based start line) + limit (max lines) to read part of a large file.",
+      parameters: { type: "object", properties: { path: { type: "string" }, offset: { type: "number" }, limit: { type: "number" } }, required: ["path"] },
+      run: ({ path: p, offset, limit }) => {
         const data = fs.readFileSync(safePath(root, p), "utf8");
-        return data.length > 60000 ? data.slice(0, 60000) + "\n…[truncated]" : data;
+        if (offset == null && limit == null) {
+          return data.length > 60000 ? data.slice(0, 60000) + "\n…[truncated — use offset/limit to read more]" : data;
+        }
+        const lines = data.split("\n");
+        const start = Math.max(0, (offset || 1) - 1);
+        const end = limit ? start + limit : lines.length;
+        const slice = lines.slice(start, end);
+        return slice.map((ln, i) => `${start + i + 1}\t${ln}`).join("\n") + (end < lines.length ? `\n…[${lines.length - end} more lines]` : "");
       },
     },
     {
@@ -124,6 +162,56 @@ export function makeTools({ root = process.cwd(), allowShell = false, allowFetch
       },
     },
     {
+      name: "edit_file",
+      description: "Make a TARGETED edit: replace an exact, unique substring (old_string) with new_string. Preferred over write_file for changing part of a file — surgical, preserves the rest. old_string must match exactly (incl. whitespace) and be unique unless replace_all is set.",
+      parameters: { type: "object", properties: { path: { type: "string" }, old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, required: ["path", "old_string", "new_string"] },
+      run: ({ path: p, old_string, new_string, replace_all }) => {
+        const abs = safePath(root, p);
+        const orig = fs.readFileSync(abs, "utf8");
+        if (old_string === new_string) throw new Error("old_string and new_string are identical — nothing to do.");
+        const count = old_string === "" ? 0 : orig.split(old_string).length - 1;
+        if (count === 0) throw new Error("old_string not found in the file (must match exactly, including whitespace).");
+        if (count > 1 && !replace_all) throw new Error(`old_string appears ${count} times — make it unique or pass replace_all:true.`);
+        const next = replace_all ? orig.split(old_string).join(new_string) : orig.replace(old_string, new_string);
+        fs.writeFileSync(abs, next);
+        return `Edited ${p} — ${replace_all ? count : 1} replacement${(replace_all ? count : 1) === 1 ? "" : "s"}.`;
+      },
+    },
+    {
+      name: "multi_edit",
+      description: "Apply MULTIPLE targeted edits to ONE file in sequence — each is an exact old_string→new_string replacement. Atomic: if any old_string isn't found, the file is left untouched. Use for several changes in the same file.",
+      parameters: { type: "object", properties: { path: { type: "string" }, edits: { type: "array", items: { type: "object", properties: { old_string: { type: "string" }, new_string: { type: "string" }, replace_all: { type: "boolean" } }, required: ["old_string", "new_string"] } } }, required: ["path", "edits"] },
+      run: ({ path: p, edits }) => {
+        const abs = safePath(root, p);
+        let content = fs.readFileSync(abs, "utf8");
+        if (!Array.isArray(edits) || !edits.length) throw new Error("edits must be a non-empty array.");
+        edits.forEach((e, i) => {
+          if (!e || typeof e.old_string !== "string") throw new Error(`edit #${i + 1}: missing old_string.`);
+          const count = e.old_string === "" ? 0 : content.split(e.old_string).length - 1;
+          if (count === 0) throw new Error(`edit #${i + 1}: old_string not found (must match exactly).`);
+          if (count > 1 && !e.replace_all) throw new Error(`edit #${i + 1}: old_string appears ${count} times — make it unique or set replace_all.`);
+          content = e.replace_all ? content.split(e.old_string).join(e.new_string) : content.replace(e.old_string, e.new_string);
+        });
+        fs.writeFileSync(abs, content);
+        return `Applied ${edits.length} edit${edits.length === 1 ? "" : "s"} to ${p}.`;
+      },
+    },
+    {
+      name: "glob",
+      description: "Find files matching a glob pattern (e.g. 'src/**/*.js', '*.md', '**/test_*.py') under the working directory. Returns matching paths, sorted.",
+      parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
+      run: ({ pattern }) => {
+        const rootReal = fs.realpathSync(root);
+        const re = globToRegExp(String(pattern));
+        const out = [];
+        walkFiles(rootReal, (abs) => {
+          const rel = path.relative(rootReal, abs).split(path.sep).join("/");
+          if (out.length < 300 && re.test(rel)) out.push(rel);
+        });
+        return out.length ? out.sort().join("\n") : "(no matches)";
+      },
+    },
+    {
       name: "list_dir",
       description: "List entries in a directory inside the working directory.",
       parameters: { type: "object", properties: { path: { type: "string" } }, required: [] },
@@ -132,23 +220,26 @@ export function makeTools({ root = process.cwd(), allowShell = false, allowFetch
     },
     {
       name: "search",
-      description: "Search files under a directory for a substring (case-insensitive). Returns matching path:line.",
+      description: "Search file contents under a directory for a REGEX (case-insensitive; falls back to a literal substring if the pattern isn't valid regex). Returns matching path:line: text.",
       parameters: { type: "object", properties: { query: { type: "string" }, path: { type: "string" } }, required: ["query"] },
       run: ({ query, path: p = "." }) => {
         const start = safePath(root, p);
         const rootReal = fs.realpathSync(root);
+        let re = null;
+        try { re = new RegExp(query, "i"); } catch { /* not valid regex — literal fallback */ }
         const needle = String(query).toLowerCase();
+        const test = (ln) => (re ? re.test(ln) : ln.toLowerCase().includes(needle));
         const out = [];
         const walk = (dir) => {
           for (const d of fs.readdirSync(dir, { withFileTypes: true })) {
             const abs = path.join(dir, d.name);
             if (d.isSymbolicLink()) continue; // never follow symlinks out of root
             if (denied(abs)) continue;
-            if (d.isDirectory()) { if (d.name !== "node_modules") walk(abs); continue; }
-            if (out.length >= 50) return;
+            if (d.isDirectory()) { if (d.name !== "node_modules" && d.name !== ".git" && d.name !== ".nomos") walk(abs); continue; }
+            if (out.length >= 100) return;
             try {
               fs.readFileSync(abs, "utf8").split("\n").forEach((ln, i) => {
-                if (out.length < 50 && ln.toLowerCase().includes(needle)) out.push(`${path.relative(rootReal, abs)}:${i + 1}: ${ln.trim().slice(0, 160)}`);
+                if (out.length < 100 && test(ln)) out.push(`${path.relative(rootReal, abs).split(path.sep).join("/")}:${i + 1}: ${ln.trim().slice(0, 200)}`);
               });
             } catch { /* binary/unreadable */ }
           }

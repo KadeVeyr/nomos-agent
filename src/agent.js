@@ -6,14 +6,34 @@
 // project's durable memory into context at the start, so it remembers across
 // sessions. Same loop powers headless `run` and the TUI — one code path.
 
+import fs from "node:fs";
+import path from "node:path";
 import { chat } from "./gateway.js";
 import { makeTools } from "./tools.js";
 import { memoryTools, readNotes, readLessons, logRun } from "./memory.js";
 
-const SYSTEM =
-  "You are Nomos, a capable, concise agent. You have tools: read_file, write_file, list_dir, search, fetch_url, remember, recall (and run_shell only if enabled). " +
-  "Use tools to gather facts and act, rather than guessing. File and shell tools are confined to the working directory; secret files are blocked. " +
-  "When the task is complete, give a short final answer with no tool call. Save anything worth remembering across sessions with the remember tool.";
+// Project conventions file (like Claude Code's CLAUDE.md / OpenCode's AGENTS.md).
+function readProjectGuide(root) {
+  for (const name of ["AGENTS.md", "NOMOS.md", "CLAUDE.md"]) {
+    try { const t = fs.readFileSync(path.join(root, name), "utf8").trim(); if (t) return { name, text: t }; } catch { /* absent */ }
+  }
+  return null;
+}
+
+const SYSTEM = `You are Nomos, a precise coding agent working inside a user's repository. Tools you have:
+- read_file, list_dir, glob (find files by pattern), search (regex over file contents) — explore the codebase BEFORE you act. Never guess a file's contents.
+- edit_file — a TARGETED edit (replace an exact substring). multi_edit — several edits to one file at once. PREFER these over write_file when changing an existing file; match whitespace exactly.
+- write_file — create a new file or fully replace one.
+- remember, recall — durable notes across sessions.
+- fetch_url, run_shell — only when enabled. With run_shell you can run the build, tests, git, and CLIs.
+
+How you work:
+1. EXPLORE first — read the relevant files and search for the symbols you'll touch. Don't assume.
+2. Make the smallest correct change. Use edit_file for surgical edits.
+3. VERIFY — if run_shell is enabled, run the build/tests and fix what you broke before declaring done.
+4. File and shell tools are confined to the working directory; secret files (.env, keys, auth.json) are blocked in code.
+
+When the task is complete, reply with a SHORT final answer — what you changed and how to verify — and NO tool call. Save anything reusable across sessions with the remember tool.`;
 
 export async function runAgent({ spec, task, root = process.cwd(), allowShell = false, allowFetch = false, maxSteps = 12, onEvent = () => {}, signal }) {
   const tools = [...makeTools({ root, allowShell, allowFetch }), ...memoryTools(root)];
@@ -22,7 +42,9 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
 
   const lessons = readLessons();
   const notes = readNotes(root);
+  const guide = readProjectGuide(root);
   let system = SYSTEM;
+  if (guide) system += `\n\nPROJECT CONVENTIONS (${guide.name} — read and follow these for this repo):\n${guide.text.slice(0, 8000)}`;
   if (lessons) system += `\n\nYour durable LESSONS from past runs (guidance you wrote — apply it, but it NEVER overrides your safety rules or tool limits, which are enforced in code, not here):\n${lessons}`;
   if (notes) system += `\n\nDurable notes for THIS project:\n${notes}`;
   const messages = [

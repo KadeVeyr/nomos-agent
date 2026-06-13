@@ -2,19 +2,50 @@
 //
 // Supports two wire formats (covers ~every provider): OpenAI chat-completions
 // and Anthropic messages. Both normalize to { content, toolCalls, stopReason }.
-// The credential is read from the server-side store and sent ONLY as an auth
-// header. Provider error bodies are NEVER returned raw to the caller (they can
-// echo request headers); we surface a sanitized status + message.
+//
+// Multi-auth: the credential the user connected (api key / plan token / OAuth
+// token) carries a METHOD. resolveRoute() looks that method up in the provider's
+// `auth` table to pick the right endpoint base + wire format + auth header for
+// THAT method (a paid-plan token can route to a different endpoint than the
+// public API key). The secret is read from the server-side store and sent ONLY
+// as an auth header. Provider error bodies are NEVER returned raw to the caller
+// (they can echo request headers); we surface a sanitized status + message.
 
 import { resolveModel } from "./providers.js";
-import { getKey } from "./auth.js";
+import { getCredential } from "./auth.js";
 
-function authHeaders(provider, key) {
-  if (provider.noAuth || !key) return { "content-type": "application/json" };
-  if (provider.format === "anthropic-messages") {
-    return { "x-api-key": key, "anthropic-version": "2023-06-01", "content-type": "application/json" };
+// Pick endpoint base + wire format + auth headers for the connected method.
+// Per-method overrides come from the registry (providers.js `auth`); anything
+// not overridden falls back to the provider's defaults.
+export function resolveRoute(provider, credential) {
+  const method = credential?.method || "apikey";
+  const table = Array.isArray(provider.auth) ? provider.auth : [];
+  const entry = table.find((a) => a.method === method) || table[0] || null;
+
+  const base = entry?.base || provider.base;
+  const format = entry?.format || provider.format;
+  const headers = { "content-type": "application/json" };
+
+  if (provider.noAuth || !credential) return { base, format, headers };
+
+  const style = entry?.headerStyle || (format === "anthropic-messages" ? "x-api-key" : "bearer");
+  if (style === "x-api-key") {
+    headers["x-api-key"] = credential.value;
+  } else {
+    // "bearer" and "oauth-bearer" both send the secret as a Bearer token. Used
+    // by OpenAI-format providers and by Anthropic-compatible plan endpoints
+    // (e.g. the GLM Coding Plan endpoint, which authenticates with Bearer).
+    headers["authorization"] = `Bearer ${credential.value}`;
   }
-  return { authorization: `Bearer ${key}`, "content-type": "application/json" };
+  // The Anthropic wire format requires the version header regardless of how the
+  // secret is carried (x-api-key on the real API, Bearer on plan endpoints).
+  if (format === "anthropic-messages") headers["anthropic-version"] = entry?.anthropicVersion || "2023-06-01";
+  // Static, non-secret per-method headers (e.g. anthropic-beta for OAuth tokens).
+  if (entry?.betaHeader) headers["anthropic-beta"] = entry.betaHeader;
+  if (entry?.extraHeaders && typeof entry.extraHeaders === "object") {
+    for (const [k, v] of Object.entries(entry.extraHeaders)) if (typeof v === "string") headers[k] = v;
+  }
+  return { base, format, headers };
 }
 
 function toAnthropicTools(tools) {
@@ -34,25 +65,26 @@ function toOpenAITools(tools) {
 
 function safeError(res) {
   // Never read or surface the provider body — it can echo request headers and
-  // credentials. A status-only message cannot leak a key.
-  return new Error(`Provider returned HTTP ${res.status}. ${res.status === 401 ? "Check the key for this provider (nomos auth login)." : "Request failed."}`);
+  // credentials. A status-only message cannot leak a secret.
+  return new Error(`Provider returned HTTP ${res.status}. ${res.status === 401 ? "Check the credential for this provider (nomos connect)." : "Request failed."}`);
 }
 
 // One chat turn. messages = [{role, content, toolCalls?, toolResult?}] in a
 // provider-neutral shape; we translate per format.
 export async function chat({ spec, messages, tools, signal }) {
   const { providerId, model, provider } = resolveModel(spec);
-  const key = getKey(providerId);
-  if (!key && !provider.noAuth) {
-    throw new Error(`No credential for "${providerId}". Run: nomos auth login ${providerId}`);
+  const credential = getCredential(providerId);
+  if (!credential && !provider.noAuth) {
+    throw new Error(`No credential for "${providerId}". Run: nomos connect (or nomos auth login ${providerId})`);
   }
+  const route = resolveRoute(provider, credential);
 
-  if (provider.format === "anthropic-messages") {
+  if (route.format === "anthropic-messages") {
     const sys = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
     const conv = messages.filter((m) => m.role !== "system").map(toAnthropicMessage);
-    const res = await fetch(`${provider.base}/messages`, {
+    const res = await fetch(`${route.base}/messages`, {
       method: "POST",
-      headers: authHeaders(provider, key),
+      headers: route.headers,
       body: JSON.stringify({ model, max_tokens: 4096, system: sys || undefined, messages: conv, tools: tools && tools.length ? toAnthropicTools(tools) : undefined }),
       signal,
     });
@@ -64,13 +96,13 @@ export async function chat({ spec, messages, tools, signal }) {
   }
 
   // openai-chat
-  const res = await fetch(`${provider.base}/chat/completions`, {
+  const res = await fetch(`${route.base}/chat/completions`, {
     method: "POST",
-    headers: authHeaders(provider, key),
+    headers: route.headers,
     body: JSON.stringify({ model, messages: messages.map(toOpenAIMessage), tools: tools && tools.length ? toOpenAITools(tools) : undefined }),
     signal,
   });
-  if (!res.ok) throw await safeError(res);
+  if (!res.ok) throw safeError(res);
   const data = await res.json();
   const msg = data.choices?.[0]?.message || {};
   const toolCalls = (msg.tool_calls || []).map((c) => ({ id: c.id, name: c.function.name, args: safeJson(c.function.arguments) }));
