@@ -69,19 +69,33 @@ async function cmdRun() {
   if (!spec) return fail('No model. Use -m provider/model, or set defaultModel in nomos.json.');
   if (!task) return fail('Missing task. Usage: nomos run -m provider/model "task"');
 
+  // Header: which model, where (so the user knows the cwd + model before anything runs).
+  if (!json) process.stderr.write(`\x1b[2m▸\x1b[0m \x1b[1m${spec}\x1b[0m \x1b[2m· ${cfg.root}${cfg.allowShell ? " · shell on" : ""}\x1b[0m\n`);
   const t0 = Date.now();
+  const counts = { read: 0, edit: 0, write: 0, shell: 0, other: 0 };
   const onEvent = (e) => {
     if (e.type === "delta") { if (!json) process.stdout.write(e.text); }
-    else if (e.type === "tool_call") process.stderr.write(`\n\x1b[2m· ${e.name}(${JSON.stringify(e.args)})\x1b[0m\n`);
-    else if (e.type === "tool_result") process.stderr.write(`\x1b[2m· → ${String(e.result).replace(/\n/g, " ⏎ ").slice(0, 160)}\x1b[0m\n`);
+    else if (e.type === "tool_call") {
+      const n = e.name;
+      if (n === "read_file") counts.read++; else if (n === "edit_file" || n === "multi_edit") counts.edit++;
+      else if (n === "write_file") counts.write++; else if (n === "run_shell") counts.shell++; else counts.other++;
+      const arg = e.args?.path || e.args?.command || e.args?.pattern || e.args?.query || "";
+      process.stderr.write(`\n\x1b[2m·\x1b[0m \x1b[36m${n}\x1b[0m \x1b[2m${String(arg).slice(0, 70)}\x1b[0m\n`);
+    }
+    else if (e.type === "tool_result") process.stderr.write(`\x1b[2m  → ${String(e.result).replace(/\n/g, " ⏎ ").slice(0, 120)}\x1b[0m\n`);
     else if (e.type === "error") process.stderr.write(`\x1b[31m· error: ${e.message}\x1b[0m\n`);
   };
 
   try {
     const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, maxSteps: cfg.maxSteps, onEvent });
-    if (json) process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim() }) + "\n");
-    else process.stdout.write("\n"); // the streamed deltas already printed the answer
-    process.stderr.write(`\x1b[2m·· ${((Date.now() - t0) / 1000).toFixed(1)}s\x1b[0m\n`);
+    if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim() }) + "\n"); return; }
+    process.stdout.write("\n"); // streamed deltas already printed the answer
+    const parts = [];
+    if (counts.read) parts.push(`${counts.read} read`);
+    if (counts.edit) parts.push(`${counts.edit} edit`);
+    if (counts.write) parts.push(`${counts.write} write`);
+    if (counts.shell) parts.push(`${counts.shell} shell`);
+    process.stderr.write(`\x1b[2m──\x1b[0m \x1b[32m✓ done\x1b[0m \x1b[2min ${((Date.now() - t0) / 1000).toFixed(1)}s${parts.length ? " · " + parts.join(", ") : ""}\x1b[0m\n`);
   } catch (e) {
     if (json) { process.stdout.write(JSON.stringify({ ok: false, model: spec, error: e.message }) + "\n"); process.exitCode = 1; }
     else fail(e.message);
@@ -285,7 +299,10 @@ async function cmdModels() {
 function fail(msg) { process.stderr.write(`nomos: ${msg}\n`); process.exitCode = 1; }
 
 function help() {
-  console.log(`nomos — the headless agent you call from your editor. Bring your own subs.
+  console.log(`nomos — the headless coding agent you call from your editor. Bring your own subs.
+
+First time?   nomos connect        (pick a provider, paste your key)
+              nomos run -m kimi-for-coding/k2p6 "fix the failing test" --allow-shell
 
   nomos run -m provider/model "task" [--json] [--allow-shell]
   nomos seat -f directive.md -m provider/model [--timeout-ms N] [--json]

@@ -4,6 +4,14 @@ All notable changes to Nomos. Working toward v1.0.
 
 ## [Unreleased]
 
+## [0.5.0] — UX (user-seat: Haiku)
+*A Haiku user-seat gave a first-time-user reaction; these are its top fixes, built.*
+- **Run header** — `▸ model · /working/dir · shell on` so you always know what's running and where.
+- **Clean tool display** — `· read_file math.js` (tool + key arg) instead of raw JSON spam.
+- **Closing summary** — `── ✓ done in 12.3s · 2 read, 1 edit, 1 shell`; no more output trailing off into silence.
+- **Working dir** shown at TUI startup; **help** now opens with a concrete getting-started example.
+- *Deferred (noted):* per-command shell confirmation in the TUI — for now `--allow-shell` is the explicit consent gate and the command is always shown before it runs.
+
 ## [0.4.0] — Streaming & feel
 *Planned via 3 rounds (deepseek-flash + deepseek-pro both ranked streaming #1: "blank line = dead product"); live-tested.*
 - **Token-by-token streaming** (`nomos run` + TUI) — `chatStream` parses SSE for both Anthropic and OpenAI wire formats and prints the answer as it arrives. Falls back cleanly to non-streaming if a provider can't stream.

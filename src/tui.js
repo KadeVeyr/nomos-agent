@@ -43,6 +43,7 @@ export async function startTui() {
       if (wired().length === 0) { out(`\n${C.dim}Nothing connected. Run ${C.r}nomos connect${C.dim} when ready.${C.r}\n`); return; }
     }
 
+    out(`${C.dim}Working in:${C.r} ${cfg.root}\n`);
     out(`${C.dim}Connected:${C.r} ${wired().map((c) => `${C.g}${c.id}${C.r}${C.dim}(${c.method})${C.r}`).join("  ")}\n`);
     out(`${C.dim}Commands: /model  /connect  /models <provider>  /help  /exit${C.r}\n`);
 
@@ -75,18 +76,31 @@ export async function startTui() {
         continue;
       }
       try {
+        const t0 = Date.now();
+        const counts = { read: 0, edit: 0, write: 0, shell: 0 };
         await runAgent({
           spec, task, root: cfg.root,
           allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, maxSteps: cfg.maxSteps,
           onEvent: (e) => {
             if (e.type === "delta") out(e.text);
-            else if (e.type === "tool_call") out(`\n${C.dim}· ${e.name}(${JSON.stringify(e.args)})${C.r}\n`);
-            else if (e.type === "tool_result") out(`${C.dim}· → ${String(e.result).replace(/\n/g, " ⏎ ").slice(0, 160)}${C.r}\n`);
+            else if (e.type === "tool_call") {
+              const n = e.name;
+              if (n === "read_file") counts.read++; else if (n === "edit_file" || n === "multi_edit") counts.edit++;
+              else if (n === "write_file") counts.write++; else if (n === "run_shell") counts.shell++;
+              const arg = e.args?.path || e.args?.command || e.args?.pattern || e.args?.query || "";
+              out(`\n${C.dim}·${C.r} ${C.c}${n}${C.r} ${C.dim}${String(arg).slice(0, 70)}${C.r}\n`);
+            }
+            else if (e.type === "tool_result") out(`${C.dim}  → ${String(e.result).replace(/\n/g, " ⏎ ").slice(0, 120)}${C.r}\n`);
           },
         });
-        out(`\n`); // streamed deltas already printed the answer
+        const parts = [];
+        if (counts.read) parts.push(`${counts.read} read`);
+        if (counts.edit) parts.push(`${counts.edit} edit`);
+        if (counts.write) parts.push(`${counts.write} write`);
+        if (counts.shell) parts.push(`${counts.shell} shell`);
+        out(`\n${C.dim}──${C.r} ${C.g}✓ done${C.r} ${C.dim}in ${((Date.now() - t0) / 1000).toFixed(1)}s${parts.length ? " · " + parts.join(", ") : ""}${C.r}\n`);
       } catch (e) {
-        out(`${C.y}error:${C.r} ${e.message}\n`);
+        out(`\n${C.y}error:${C.r} ${e.message}\n`);
       }
     }
   } finally {
