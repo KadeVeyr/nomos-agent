@@ -69,6 +69,33 @@ function safeError(res) {
   return new Error(`Provider returned HTTP ${res.status}. ${res.status === 401 ? "Check the credential for this provider (nomos connect)." : "Request failed."}`);
 }
 
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function backoff(attempt, res) {
+  const ra = res && Number(res.headers?.get?.("retry-after"));
+  if (ra) return Math.min(ra * 1000, 10000);
+  return Math.min(500 * 2 ** attempt, 8000) + Math.random() * 250; // exp backoff + jitter
+}
+
+// fetch with retry on transient failures (429 / 5xx / network). Never retries an
+// abort (cancellation) or a 4xx other than 429. Honors Retry-After.
+async function fetchRetry(url, opts, retries = 3) {
+  for (let attempt = 0; ; attempt++) {
+    let res;
+    try {
+      res = await fetch(url, opts);
+    } catch (e) {
+      if (e?.name === "AbortError" || attempt >= retries) throw e;
+      await sleep(backoff(attempt));
+      continue;
+    }
+    if ((res.status === 429 || (res.status >= 500 && res.status <= 599)) && attempt < retries) {
+      await sleep(backoff(attempt, res));
+      continue;
+    }
+    return res;
+  }
+}
+
 // One chat turn. messages = [{role, content, toolCalls?, toolResult?}] in a
 // provider-neutral shape; we translate per format.
 export async function chat({ spec, messages, tools, signal }) {
@@ -82,7 +109,7 @@ export async function chat({ spec, messages, tools, signal }) {
   if (route.format === "anthropic-messages") {
     const sys = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
     const conv = messages.filter((m) => m.role !== "system").map(toAnthropicMessage);
-    const res = await fetch(`${route.base}/messages`, {
+    const res = await fetchRetry(`${route.base}/messages`, {
       method: "POST",
       headers: route.headers,
       body: JSON.stringify({ model, max_tokens: 4096, system: sys || undefined, messages: conv, tools: tools && tools.length ? toAnthropicTools(tools) : undefined }),
@@ -96,7 +123,7 @@ export async function chat({ spec, messages, tools, signal }) {
   }
 
   // openai-chat
-  const res = await fetch(`${route.base}/chat/completions`, {
+  const res = await fetchRetry(`${route.base}/chat/completions`, {
     method: "POST",
     headers: route.headers,
     body: JSON.stringify({ model, messages: messages.map(toOpenAIMessage), tools: tools && tools.length ? toOpenAITools(tools) : undefined }),

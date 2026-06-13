@@ -4,6 +4,13 @@ All notable changes to Nomos. Working toward v1.0.
 
 ## [Unreleased]
 
+## [0.3.0] — Agent-loop robustness
+*Planned via 3 rounds (deepseek-flash + mimo converged on these exact gaps); live-tested.*
+- **Transient-error retry** — 429 / 5xx / network errors retry with exponential backoff + jitter, honoring `Retry-After`. A single hiccup no longer kills a session. Aborts (cancellation) are never retried.
+- **Parallel tool execution** — independent tool calls in a turn run concurrently (results preserved in order), instead of serializing and burning the step budget.
+- **Context trimming** — on long runs the oldest tool observations are truncated over a char budget, so the transcript can't balloon and degrade late-turn reasoning.
+- **Live-tested:** NOMOS added a function + its test across two files with parallel reads, verified green.
+
 ## [0.2.0] — Tooling parity
 *Planned via 3 rounds (what's next / how to improve / what the others do); built and live-tested.*
 - **`glob`** — find files by pattern (`src/**/*.js`, `**/test_*.py`).

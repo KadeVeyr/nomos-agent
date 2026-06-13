@@ -12,6 +12,22 @@ import { chat } from "./gateway.js";
 import { makeTools } from "./tools.js";
 import { memoryTools, readNotes, readLessons, logRun } from "./memory.js";
 
+// Keep context bounded on long runs: when the transcript exceeds a char budget,
+// truncate the OLDEST tool observations (least relevant late in a run). The
+// model keeps its reasoning + recent results; old raw file dumps get summarised.
+function trimContext(messages, maxChars = 150000) {
+  let total = 0;
+  for (const m of messages) total += m.content ? m.content.length : 0;
+  if (total <= maxChars) return;
+  for (const m of messages) {
+    if (total <= maxChars) break;
+    if (m.role === "tool" && m.content && m.content.length > 400) {
+      total -= m.content.length - 200;
+      m.content = m.content.slice(0, 200) + "\n…[older tool output trimmed to save context]";
+    }
+  }
+}
+
 // Project conventions file (like Claude Code's CLAUDE.md / OpenCode's AGENTS.md).
 function readProjectGuide(root) {
   for (const name of ["AGENTS.md", "NOMOS.md", "CLAUDE.md"]) {
@@ -54,6 +70,7 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
 
   let finalText = "";
   for (let step = 0; step < maxSteps; step++) {
+    trimContext(messages); // bound context growth on long runs
     let res;
     try {
       res = await chat({ spec, messages, tools: toolDefs, signal });
@@ -70,12 +87,13 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
     }
 
     messages.push({ role: "assistant", content, toolCalls });
-    for (const call of toolCalls) {
+    // Run this turn's tool calls in PARALLEL (independent calls shouldn't block
+    // each other); results are pushed back in the model's original call order.
+    const runOne = async (call) => {
       onEvent({ type: "tool_call", name: call.name, args: call.args });
       let result;
       try {
         const tool = byName[call.name];
-        // Validate required args before running.
         const req = tool?.parameters?.required || [];
         const missing = req.filter((k) => call.args == null || call.args[k] === undefined);
         if (!tool) result = `Unknown tool: ${call.name}`;
@@ -85,8 +103,10 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
         result = `Tool error: ${e.message}`; // recover: the model sees the error and can adapt
       }
       onEvent({ type: "tool_result", name: call.name, result: String(result).slice(0, 600) });
-      messages.push({ role: "tool", toolCallId: call.id, content: String(result) });
-    }
+      return { call, result };
+    };
+    const results = await Promise.all(toolCalls.map(runOne));
+    for (const { call, result } of results) messages.push({ role: "tool", toolCallId: call.id, content: String(result) });
     if (step === maxSteps - 1) finalText = content || "[nomos] Reached the step limit without a final answer.";
   }
 
