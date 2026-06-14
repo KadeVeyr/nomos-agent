@@ -9,7 +9,7 @@ import { PROVIDERS, resolveModel } from "../src/providers.js";
 import { parseModels } from "../src/models.js";
 import { extractFinalSentinel, runSeat, packContext } from "../src/seat.js";
 import { parseVerdict } from "../src/council.js";
-import { makeReceipt, verifyReceiptHash, canonicalReceipt, receiptIssues, RECEIPT_VERSION } from "../src/receipt.js";
+import { makeReceipt, verifyReceiptHash, canonicalReceipt, receiptIssues, auditChain, RECEIPT_VERSION } from "../src/receipt.js";
 import { trimContext, readProjectCommands } from "../src/agent.js";
 
 test("resolveRoute: kimi-for-coding = anthropic + x-api-key + version, no bearer", () => {
@@ -129,12 +129,74 @@ test("verifyReceiptHash: a recomputed-hash forge of cross_provider is still caug
   assert.ok(!verifyReceiptHash(forged));
 });
 
-test("receipt v1.0 is locked, and a fresh receipt is intact + complete", () => {
-  assert.equal(RECEIPT_VERSION, "1.0");
+test("receipt v1.1: a fresh receipt is intact + complete + carries a chain link", () => {
+  assert.equal(RECEIPT_VERSION, "1.1");
   const r = makeReceipt({ task: "t", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "looks right" }, ts: "2020" });
-  assert.equal(r.nomos_receipt, "1.0");
+  assert.equal(r.nomos_receipt, "1.1");
+  assert.equal(r.prev_receipt_hash, null); // genesis
   assert.ok(verifyReceiptHash(r));
-  assert.deepEqual(receiptIssues(r), []); // complete
+  assert.deepEqual(receiptIssues(r), []);
+});
+
+test("v1.0 receipts STILL verify (the lock holds) — canonicalization is version-aware", () => {
+  // hand-build a v1.0 receipt (no prev field) and sign it the v1.0 way
+  const v10 = { nomos_receipt: "1.0", task: "t", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "r" }, cross_provider: true };
+  const h = crypto.createHash("sha256").update(canonicalReceipt(v10)).digest("hex");
+  v10.hash = h; v10.id = h.slice(0, 12); v10.verdict = "PASS";
+  assert.ok(verifyReceiptHash(v10), "a 1.0 receipt must still verify after the 1.1 extension");
+  assert.deepEqual(receiptIssues(v10), []);
+  // and the 1.1 chain link must NOT leak into the 1.0 pre-image
+  assert.ok(!canonicalReceipt(v10).includes("prev_receipt_hash"));
+});
+
+function makeChain(n) {
+  const rs = []; let prev = null;
+  for (let i = 0; i < n; i++) {
+    const r = makeReceipt({ task: "t" + i, proposer: { model: "a/x", provider: "a", output: "o" + i }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "r" + i }, ts: "2020", prev });
+    rs.push(r); prev = r.hash;
+  }
+  return rs;
+}
+
+test("auditChain: a valid chain passes; head is the last receipt; ORDER comes from links not array order", () => {
+  const rs = makeChain(3);
+  const res = auditChain(rs);
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(res.length, 3);
+  assert.equal(res.head, rs[2].id);
+  // shuffling the array must NOT matter — order is derived from prev links
+  assert.ok(auditChain([rs[2], rs[0], rs[1]]).ok);
+  // a single genesis receipt is a valid chain of length 1
+  assert.ok(auditChain(makeChain(1)).ok);
+});
+
+test("auditChain catches insert/delete/reorder/fork/tamper (the whole point)", () => {
+  const rs = makeChain(4);
+  // TAMPER without recompute → hash mismatch
+  assert.ok(!auditChain([rs[0], { ...rs[1], task: "EDITED" }, rs[2], rs[3]]).ok);
+  // TAMPER with recompute (edit + re-sign rs[1]) → descendants' prev now dangles
+  const reSigned = makeReceipt({ task: "EDITED", proposer: rs[1].proposer, verifier: rs[1].verifier, ts: "2020", prev: rs[0].hash });
+  assert.ok(!auditChain([rs[0], reSigned, rs[2], rs[3]]).ok); // rs[2].prev points to the OLD rs[1].hash → missing link
+  // DELETE a middle receipt → missing link
+  assert.ok(!auditChain([rs[0], rs[1], rs[3]]).ok);
+  // FORK — two receipts share a prev
+  const forkB = makeReceipt({ task: "fork", proposer: rs[2].proposer, verifier: rs[2].verifier, ts: "2020", prev: rs[1].hash });
+  const fork = auditChain([rs[0], rs[1], rs[2], forkB]);
+  assert.ok(!fork.ok);
+  assert.ok(fork.errors.some((e) => /fork/i.test(e)));
+  // TWO genesis
+  const otherGenesis = makeChain(1)[0];
+  assert.ok(!auditChain([rs[0], rs[1], otherGenesis]).ok);
+});
+
+test("auditChain: v1.0 receipts are ignored for the chain; a clean chain alongside one still validates", () => {
+  const rs = makeChain(2);
+  const v10 = { nomos_receipt: "1.0", task: "old", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "r" }, cross_provider: true };
+  const h = crypto.createHash("sha256").update(canonicalReceipt(v10)).digest("hex");
+  v10.hash = h; v10.id = h.slice(0, 12); v10.verdict = "PASS";
+  const res = auditChain([...rs, v10]);
+  assert.ok(res.ok, JSON.stringify(res.errors));
+  assert.equal(res.length, 2); // the v1.0 receipt isn't counted in the chain
 });
 
 test("receiptIssues catches a TRUNCATED verdict (the 3rd failure mode) + missing identity", () => {

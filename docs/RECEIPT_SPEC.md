@@ -136,9 +136,51 @@ CI), prints `✓ intact` / `✗ TAMPERED` / `✗ INCOMPLETE`, and with `--json` 
 The first three rows are the guarantees. The last three are the honest limits of a
 keyless receipt — closing them needs provider signatures/attestation (future work).
 
+## Receipt chain (v1.1)
+
+v1.1 adds ONE canonical field, `prev_receipt_hash`, so a directory of receipts
+forms a tamper-evident **append-only chain** collapsed into a single pinnable head
+id. It is a compatible extension: a v1.0 receipt (no `prev_receipt_hash`) still
+verifies standalone, because canonicalization is **version-aware** — the field is
+included in the pre-image **only for `v >= 1.1`**.
+
+- `prev_receipt_hash` = the **full lowercase sha256 hex** of the immediately
+  previous receipt's hash, or `null` for the **genesis** (the only receipt allowed
+  a null prev). It is part of the canonical pre-image (so editing any past receipt
+  changes its hash and breaks every descendant that points at it).
+- The v1.1 pre-image appends `prev_receipt_hash` after `cross_provider`.
+
+**`nomos audit <dir>`** verifies a whole directory offline (no network). Order is
+derived **only from the prev links** — never filename or mtime (both forgeable). A
+directory is a **valid chain** iff every receipt is intact + complete AND: exactly
+one genesis (`prev=null`), exactly one head (no receipt points to it), every
+`prev_receipt_hash` resolves to a present receipt, and there is no fork (two
+receipts sharing a prev), cycle, duplicate, or detached entry. v1.0 receipts in the
+directory are ignored for the chain (they verify standalone via `receipt verify`).
+Exit **2** if broken; prints the head id to pin. `nomos council` / `nomos verify`
+auto-link each new receipt onto the current head.
+
+| Chain attack | Caught by |
+|---|---|
+| Insert / edit a mid-chain entry (even re-signed) | the next receipt's `prev` no longer resolves → **missing link** |
+| Delete an entry | its child's `prev` dangles → **missing link** / extra head |
+| Reorder entries | order is from links, not array/file order — reordering changes nothing, or breaks the single-genesis/head invariant |
+| Fork the history | two receipts share a `prev` → **fork** |
+
+**HONEST SCOPE (do not over-read this).** A receipt hash is keyless
+content-addressing, not a signature: it proves a receipt has not been edited since
+its hash was computed, not *who* computed it. A receipt chain extends this — given
+a fixed generator, it proves no receipt was **inserted, deleted, or reordered**
+after the fact without recomputing every descendant hash, and it collapses an
+entire directory's history into **one pinnable head hash**. It does **not** prevent
+a malicious or compromised generator from forging any single receipt or rebuilding
+the entire chain from scratch with self-consistent hashes. **Trust in a chain is
+trust in its generator** (e.g. your own CI), reduced to trust in one head id.
+
 ## Stability
 
-v1.0 is **locked**: the pre-image field set, order, hashing, id derivation, and
-the cross_provider rule will not change under the `1.0` version tag. A future
-breaking change ships under a new `nomos_receipt` version; v1.0 receipts keep
-verifying against this document.
+The v1.0 pre-image (field set, order, hashing, id derivation, cross_provider rule)
+is **locked** and unchanged. v1.1 is a **compatible extension** — it only appends
+`prev_receipt_hash`, and only for `v >= 1.1`, so every v1.0 receipt keeps verifying
+against this document. A future *breaking* change would ship under a new
+`nomos_receipt` version.

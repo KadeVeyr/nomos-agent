@@ -22,12 +22,14 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-// 1.0 is the LOCKED public schema (see docs/RECEIPT_SPEC.md). The canonical
-// pre-image (canonicalReceipt), the sha256, the 12-hex id, and the cross_provider
-// re-derivation are stable — a third party can re-implement the check from the
-// spec and verify any 1.0 receipt offline, forever. Binds proposer/verifier
-// MODEL+PROVIDER (not just the verdict) into the hash.
-export const RECEIPT_VERSION = "1.0";
+// The canonical pre-image (canonicalReceipt), the sha256, the 12-hex id, and the
+// cross_provider re-derivation are a stable public contract (docs/RECEIPT_SPEC.md)
+// — a third party can re-implement the check and verify any receipt offline.
+// 1.1 adds ONE field, `prev_receipt_hash`, binding each receipt to the previous
+// one so a directory of receipts forms a tamper-evident append-only CHAIN under a
+// single pinnable head hash (see auditChain). 1.0 receipts (no prev field) still
+// verify as standalone — canonicalization is version-aware, so the lock holds.
+export const RECEIPT_VERSION = "1.1";
 
 // The only verdicts a complete receipt may carry. A receipt whose verifier verdict
 // is anything else is treated as truncated/malformed (a cut-off verifier reply that
@@ -44,7 +46,7 @@ function receiptDir(root) {
 // fields and are deliberately NOT signed here (id+verdict are consistency-checked
 // against the signed source in verifyReceiptHash instead).
 export function canonicalReceipt(r) {
-  return JSON.stringify({
+  const pre = {
     v: r.nomos_receipt,
     task: r.task ?? null,
     proposer_model: r.proposer?.model ?? null,
@@ -55,24 +57,31 @@ export function canonicalReceipt(r) {
     verifier_verdict: r.verifier?.verdict ?? null,
     verifier_reasoning: r.verifier?.reasoning ?? null,
     cross_provider: r.cross_provider ?? null,
-  });
+  };
+  // v1.1+ binds the chain link into the hash (so editing any past receipt changes
+  // its hash and breaks every descendant). v1.0 receipts hash EXACTLY as before —
+  // the field is appended only for >= 1.1, so the 1.0 lock is preserved.
+  if (r.nomos_receipt !== "1.0") pre.prev_receipt_hash = r.prev_receipt_hash ?? null;
+  return JSON.stringify(pre);
 }
 
 // Build a receipt object from a finished proposer→verifier run. `ts` is supplied
 // by the caller (ISO string) so this stays pure/deterministic for the hash.
-export function makeReceipt({ task, proposer, verifier, ts }) {
+export function makeReceipt({ task, proposer, verifier, ts, prev = null }) {
   const crossProvider = proposer.provider !== verifier.provider;
   const verdict = verifier.verdict || "UNKNOWN";
   // The hash binds every trust-bearing field — WHO proposed, WHO verified, with
-  // what verdict and reasoning, over what task/output, and whether it was truly
-  // cross-provider. Tampering with any (incl. swapping the verifier model to a
-  // more authoritative one, or flipping the verdict) changes the id.
+  // what verdict and reasoning, over what task/output, whether it was truly
+  // cross-provider, and the PREVIOUS receipt's hash (the chain link). Tampering
+  // with any (incl. swapping the verifier model, flipping the verdict, or
+  // re-pointing the chain) changes the id.
   const signed = {
     nomos_receipt: RECEIPT_VERSION,
     task,
     proposer: { model: proposer.model, provider: proposer.provider, output: proposer.output },
     verifier: { model: verifier.model, provider: verifier.provider, verdict, reasoning: verifier.reasoning },
     cross_provider: crossProvider,
+    prev_receipt_hash: prev ?? null,
   };
   const hash = crypto.createHash("sha256").update(canonicalReceipt(signed)).digest("hex");
   return {
@@ -83,9 +92,28 @@ export function makeReceipt({ task, proposer, verifier, ts }) {
     proposer: { model: proposer.model, provider: proposer.provider, output: proposer.output, steps: proposer.steps ?? null },
     verifier: { model: verifier.model, provider: verifier.provider, verdict, reasoning: verifier.reasoning },
     cross_provider: crossProvider,
+    prev_receipt_hash: prev ?? null,
     verdict,
     hash,
   };
+}
+
+// The hash of the current chain HEAD under root's receipt dir, to pass as `prev`
+// when writing the next receipt (so the chain grows). Returns null if there are no
+// receipts yet, or if the existing chain is broken — a new receipt then starts a
+// fresh genesis rather than linking onto a broken history (the break stays visible
+// to `nomos audit`). Best-effort + never throws.
+export function headHash(root) {
+  try {
+    const files = fs.readdirSync(receiptDir(root)).filter((f) => f.endsWith(".json"));
+    const receipts = [];
+    for (const f of files) { try { receipts.push(JSON.parse(fs.readFileSync(path.join(receiptDir(root), f), "utf8"))); } catch { /* skip */ } }
+    if (!receipts.length) return null;
+    const res = auditChain(receipts);
+    if (!res.ok || !res.head) return null;
+    const head = receipts.find((r) => r.id === res.head);
+    return head ? head.hash : null;
+  } catch { return null; }
 }
 
 export function writeReceipt(root, receipt) {
@@ -131,7 +159,67 @@ export function receiptIssues(r) {
   if (!VALID_VERDICTS.has(r.verifier?.verdict)) issues.push(`verifier.verdict "${r.verifier?.verdict ?? ""}" is not PASS/FAIL/CONCERNS (truncated or missing verdict)`);
   if (!r.verifier?.reasoning || !String(r.verifier.reasoning).trim()) issues.push("verifier.reasoning is empty (truncated verdict)");
   if (r.task == null || String(r.task).trim() === "") issues.push("task missing");
+  if (r.prev_receipt_hash != null && !/^[a-f0-9]{64}$/.test(String(r.prev_receipt_hash))) issues.push("prev_receipt_hash is not null or a 64-hex sha256");
   return issues;
+}
+
+// Verify a set of receipts forms ONE valid append-only chain, offline (no provider
+// calls). Order is derived ONLY from prev_receipt_hash links — never filename or
+// timestamp (both forgeable). Returns { ok, head, length, errors }. Each receipt
+// must be intact (verifyReceiptHash) AND complete (receiptIssues); then the chain
+// must have exactly one genesis (prev=null), exactly one head, every prev must
+// resolve to a present receipt, and there must be no fork, cycle, duplicate, or
+// detached entry. 1.0 receipts (no chain link) are ignored here — they verify
+// standalone via `nomos receipt verify`.
+//
+// HONEST SCOPE: this is tamper-EVIDENCE, not authorship. It catches a post-hoc
+// insert/delete/reorder/fork by anyone who does NOT control the generator, and
+// collapses a whole history into one pinnable head id. It does NOT stop a
+// generator from rebuilding the entire chain from scratch — trust in a chain is
+// trust in its generator, reduced to trust in one head hash.
+export function auditChain(receipts) {
+  const errors = [];
+  const nodes = [];
+  for (const r of (receipts || [])) {
+    if (!r || r.nomos_receipt === "1.0") continue; // chain is v1.1+
+    if (!verifyReceiptHash(r)) { errors.push(`tampered/inconsistent receipt ${r.id ?? "?"} (hash mismatch)`); continue; }
+    const iss = receiptIssues(r);
+    if (iss.length) { errors.push(`incomplete receipt ${r.id ?? "?"}: ${iss[0]}`); continue; }
+    nodes.push(r);
+  }
+  if (!nodes.length) return { ok: false, head: null, length: 0, errors: errors.length ? errors : ["no chain-eligible (v1.1+) receipts found"] };
+
+  const byHash = new Map();
+  for (const r of nodes) { if (byHash.has(r.hash)) errors.push(`duplicate receipt ${r.id}`); byHash.set(r.hash, r); }
+
+  const childrenOf = new Map(); // prevHash -> [receipts]
+  for (const r of nodes) {
+    const p = r.prev_receipt_hash ?? null;
+    if (p === null) continue;
+    if (!byHash.has(p)) errors.push(`missing link: ${r.id} points to absent ${String(p).slice(0, 12)}…`);
+    childrenOf.set(p, [...(childrenOf.get(p) || []), r]);
+  }
+  for (const [p, kids] of childrenOf) if (kids.length > 1) errors.push(`fork at ${String(p).slice(0, 12)}…: ${kids.map((k) => k.id).join(", ")}`);
+
+  const genesis = nodes.filter((r) => (r.prev_receipt_hash ?? null) === null);
+  if (genesis.length !== 1) errors.push(`expected exactly one genesis (prev=null), found ${genesis.length}`);
+  const heads = nodes.filter((r) => !childrenOf.has(r.hash));
+  if (heads.length !== 1) errors.push(`expected exactly one head, found ${heads.length}`);
+
+  let head = null;
+  if (!errors.length) {
+    const seen = new Set();
+    let cur = genesis[0];
+    while (cur) {
+      if (seen.has(cur.hash)) { errors.push(`cycle at ${cur.id}`); break; }
+      seen.add(cur.hash);
+      const kids = childrenOf.get(cur.hash) || [];
+      if (!kids.length) { head = cur; break; }
+      cur = kids[0];
+    }
+    if (!errors.length && seen.size !== nodes.length) errors.push(`chain covers ${seen.size}/${nodes.length} receipts — ${nodes.length - seen.size} detached`);
+  }
+  return { ok: errors.length === 0, head: head ? head.id : null, length: nodes.length, errors };
 }
 
 // Human-readable one-block summary for the terminal.

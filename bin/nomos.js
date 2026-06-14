@@ -16,7 +16,7 @@ import readline from "node:readline";
 import os from "node:os";
 import path from "node:path";
 import { Writable } from "node:stream";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { runAgent } from "../src/agent.js";
 import { listProviders, PROVIDERS } from "../src/providers.js";
 import { setKey, setCredential, removeKey, listAuth } from "../src/auth.js";
@@ -26,7 +26,7 @@ import { startTui } from "../src/tui.js";
 import { makeIo, runConnect, authMethods } from "../src/connect.js";
 import { listModels, CURATED } from "../src/models.js";
 import { runCouncil } from "../src/council.js";
-import { renderReceipt, writeReceipt, verifyReceiptHash, receiptIssues } from "../src/receipt.js";
+import { renderReceipt, writeReceipt, verifyReceiptHash, receiptIssues, auditChain, headHash } from "../src/receipt.js";
 import { buildPolicy, policyFromEnv } from "../src/permissions.js";
 import { runSeat } from "../src/seat.js";
 import { getDiff, runVerify } from "../src/verify.js";
@@ -145,7 +145,7 @@ async function cmdVerify() {
   if (!diff.trim()) return fail(staged ? "No staged changes to verify (run `git add` first, or drop --staged)." : "No changes to verify. Edit something first, or pass --staged / --against <ref>.");
 
   if (!json) process.stderr.write(`\x1b[2m▸ reviewing ${diff.split("\n").length} diff lines with ${spec}…\x1b[0m\n`);
-  const { receipt, verdict, reasoning } = await runVerify({ diff, spec, source, maxTokens: cfg.maxTokens });
+  const { receipt, verdict, reasoning } = await runVerify({ diff, spec, source, maxTokens: cfg.maxTokens, prev: headHash(cfg.root) });
   const file = writeReceipt(cfg.root, receipt);
   if (json) {
     process.stdout.write(JSON.stringify(receipt) + "\n");
@@ -311,6 +311,30 @@ function cmdReceipt() {
   if (!ok) process.exitCode = 2;
 }
 
+function cmdAudit() {
+  // nomos audit <dir> — verify a directory of receipts forms ONE valid append-only
+  // chain (offline, no provider calls). Prints the head id to pin; exit 2 if the
+  // chain is broken/tampered (inserted/deleted/reordered/forked entry). The chain
+  // is tamper-evidence relative to its generator, not authorship (see RECEIPT_SPEC).
+  const dir = argv[1];
+  if (!dir) return fail("Usage: nomos audit <receipts-dir> [--json]  (e.g. nomos audit .nomos/receipts)");
+  let files;
+  try { files = readdirSync(dir).filter((f) => f.endsWith(".json")); }
+  catch (e) { return fail(`can't read receipts dir: ${e.message}`); }
+  const receipts = [];
+  for (const f of files) { try { receipts.push(JSON.parse(readFileSync(path.join(dir, f), "utf8"))); } catch { /* skip non-receipt json */ } }
+  const res = auditChain(receipts);
+  if (has("--json")) {
+    process.stdout.write(JSON.stringify(res) + "\n");
+  } else if (res.ok) {
+    process.stdout.write(`\x1b[32m✓ valid chain\x1b[0m — ${res.length} receipt${res.length === 1 ? "" : "s"}, head \x1b[1m${res.head}\x1b[0m \x1b[2m(pin this id)\x1b[0m\n`);
+  } else {
+    process.stdout.write(`\x1b[31m✗ BROKEN chain\x1b[0m \x1b[2m(${res.length} chain receipt${res.length === 1 ? "" : "s"})\x1b[0m:\n`);
+    for (const e of res.errors) process.stdout.write(`  \x1b[31m·\x1b[0m ${e}\n`);
+  }
+  if (!res.ok) process.exitCode = 2;
+}
+
 async function cmdMcp() {
   // nomos mcp — run as an MCP server over stdio so editors (Claude Code, Cursor,
   // Codex) call nomos_verify / nomos_seat as tools. Speaks newline-delimited
@@ -434,6 +458,7 @@ else if (cmd === "seat") await cmdSeat();
 else if (cmd === "council") await cmdCouncil();
 else if (cmd === "connect") await cmdConnect();
 else if (cmd === "receipt") cmdReceipt();
+else if (cmd === "audit") cmdAudit();
 else if (cmd === "mcp") await cmdMcp();
 else if (cmd === "auth") await cmdAuth();
 else if (cmd === "memory") cmdMemory();

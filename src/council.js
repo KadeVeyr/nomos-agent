@@ -9,7 +9,7 @@
 import { runAgent } from "./agent.js";
 import { chat } from "./gateway.js";
 import { resolveModel } from "./providers.js";
-import { makeReceipt, writeReceipt } from "./receipt.js";
+import { makeReceipt, writeReceipt, headHash } from "./receipt.js";
 
 const VERIFIER_SYSTEM = `You are an adversarial CROSS-PROVIDER verifier. A different AI model — the "proposer", built by a different company — produced an answer to a task. Your job is to CATCH WHAT IT GOT WRONG, not to agree. Be skeptical, specific, and concrete. Default to scrutiny: an answer that is plausible but unsupported is a CONCERNS, not a PASS.
 
@@ -66,6 +66,7 @@ export async function runCouncil(opts, deps = {}) {
     proposer: { model: proposerSpec, provider: prop.providerId, output: (output || "").trim(), steps },
     verifier: { model: verifierSpec, provider: ver.providerId, verdict, reasoning },
     ts: now(),
+    prev: headHash(root), // link onto the current chain head (genesis if first)
   });
   const file = writeReceipt(root, receipt);
   return { receipt, file };
