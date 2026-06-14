@@ -4,6 +4,13 @@ All notable changes to Nomos.
 
 ## [Unreleased]
 
+## [1.5.0] — Subscription login (use your plan, not API credits)
+- **Sign in with your subscription** instead of paying per-token. `nomos connect` → **OpenAI** does a browser sign-in ("ChatGPT Plus/Pro login", OAuth 2.0 PKCE loopback, token auto-refreshes); **xAI** is a paste — SuperGrok hands you a token after sign-in, so you paste it ("SuperGrok / X Premium+ token"). No API key either way. Tokens live only in local `auth.json` (0600).
+- **Responses-API wire format** — these subscription endpoints speak the OpenAI **Responses API** (`input`/`instructions`, not `messages`) on a different base than the public key, so the gateway now has a third format (`openai-responses`) alongside chat-completions and Anthropic messages. For OpenAI it sends the `chatgpt-account-id` (decoded from the token) + the `originator` header its CLI requires.
+- Client ids / endpoints are each vendor's **first-party CLI** registration (Codex, pi-grok, xAI OIDC discovery) — sourced, not guessed. Provenance + the personal-use caveat: [docs/PLAN_OAUTH.md](docs/PLAN_OAUTH.md).
+- **64 tests**: + PKCE / auth-URL / JWT account-id / token exchange + refresh (skew, carry-forward, sanitized errors), + the Responses body builder, the tool-call round-trip (function_call ↔ output ids), and the plan-oauth route headers.
+- *Note:* the OAuth + token flows and the Responses request shape are unit-tested; the live browser login and the exact streaming event names want a real run against each subscription to confirm end to end.
+
 ## [1.4.0] — Provider breadth + receipt verification + CI
 - **Two more providers** (now 15): `google` (Gemini, via its OpenAI-compatible endpoint `…/v1beta/openai`) and `minimax` (`api.minimax.io/v1`). Both bring-your-own-key, OpenAI-chat wire format; endpoints taken from each vendor's official docs. Curated model fallbacks added; live `nomos models` stays the source of truth.
 - **`nomos receipt verify <file>`** — re-check a receipt's content hash later (the integrity check a third party runs on a receipt you hand them). `✗ TAMPERED` → exit 2. Closes the loop: verify → receipt → **re-verify**.

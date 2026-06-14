@@ -38,7 +38,14 @@ export const PROVIDERS = {
     keyHint: "sk-…",
     // OpenAI's reasoning models reject "max_tokens" and require this field name.
     maxTokensParam: "max_completion_tokens",
-    auth: [KEY("sk-…")],
+    auth: [
+      KEY("sk-…"),
+      // Subscription login: use your ChatGPT Plus/Pro plan instead of API credits.
+      // Routes to the Responses API on the ChatGPT backend (constants in oauth.js).
+      { method: "plan-oauth", label: "ChatGPT Plus/Pro login (subscription)", hint: "sign in with your ChatGPT account — no API key",
+        base: "https://chatgpt.com/backend-api/codex", format: "openai-responses", headerStyle: "oauth-bearer",
+        originator: "codex_cli_rs", openaiBeta: "responses=experimental", accountIdHeader: "chatgpt-account-id", responsesStore: false },
+    ],
   },
   moonshot: {
     name: "Moonshot (Kimi)",
@@ -78,7 +85,13 @@ export const PROVIDERS = {
     format: "openai-chat",
     env: "XAI_API_KEY",
     keyHint: "xai-…",
-    auth: [KEY("xai-…")],
+    auth: [
+      KEY("xai-…"),
+      // SuperGrok hands you a token after you sign in — paste it (not a browser
+      // redirect like OpenAI). Routes to the Responses API on api.x.ai with Bearer.
+      { method: "plan-token", label: "SuperGrok / X Premium+ token (subscription)", hint: "paste the token SuperGrok gives you after sign-in",
+        base: "https://api.x.ai/v1", format: "openai-responses", headerStyle: "oauth-bearer" },
+    ],
   },
   zai: {
     name: "Z.ai (GLM)",
