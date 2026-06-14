@@ -74,7 +74,9 @@ How you work:
 4. VERIFY — if run_shell is enabled, run the project's test/build command (see PROJECT COMMANDS if present) and fix what you broke before declaring done.
 5. File and shell tools are confined to the working directory; secret files (.env, keys, auth.json) are blocked in code.
 
-When the task is complete, reply with a SHORT final answer — what you changed and how to verify — and NO tool call. Save anything reusable across sessions with the remember tool.`;
+5. BE TRANSPARENT ABOUT WORKAROUNDS. If a command or tool the user (or the project's config) declared FAILS and you succeed by another route — e.g. the project's test command errors and you run a different one — you MUST surface that discrepancy in your final answer ("the project's test command \`X\` failed: <reason>; I verified with \`Y\` instead — you may want to fix it"). Succeeding by an alternate route while hiding that the declared route is broken erodes trust; never report a clean result that conceals a broken project command or config.
+
+When the task is complete, reply with a SHORT final answer — what you changed and how to verify — and NO tool call. Surface any workaround per rule 5. Save anything reusable across sessions with the remember tool.`;
 
 export async function runAgent({ spec, task, root = process.cwd(), allowShell = false, allowFetch = false, policy = DEFAULT_POLICY, headless = true, maxSteps = 12, maxTokens, onEvent = () => {}, signal }) {
   // Effective policy: start from the resolved policy, then let the legacy
