@@ -133,6 +133,8 @@ test("git: read-only commands run; mutating + escaping ones are refused", { skip
   await assert.rejects(() => git.run({ args: ["show", "HEAD:deploy.pem"] }), /secret/);
   await assert.rejects(() => git.run({ args: ["show", ":(top).env"] }), /secret/);
   await assert.rejects(() => git.run({ args: ["show", "HEAD:cfg/server.key.bak"] }), /secret/);
+  await assert.rejects(() => git.run({ args: ["show", "HEAD:config/prod.env"] }), /secret/);      // env file without leading dot
+  await assert.rejects(() => git.run({ args: ["show", "HEAD:env.production"] }), /secret/);        // ditto
   // empty args
   await assert.rejects(() => git.run({ args: [] }), /non-empty/);
   fs.rmSync(d, { recursive: true, force: true });

@@ -25,7 +25,7 @@ import net from "node:net";
 import { execFile } from "node:child_process";
 
 const DENY_BASENAMES = new Set([".env", "auth.json", ".git", ".npmrc", "id_rsa", "secrets.json", "credentials"]);
-const DENY_EXT = new Set([".key", ".pem", ".pfx", ".p12", ".p8", ".pkcs12", ".jks", ".keystore", ".asc", ".gpg", ".ppk", ".ovpn", ".kdbx"]);
+const DENY_EXT = new Set([".key", ".pem", ".pfx", ".p12", ".p8", ".pkcs12", ".jks", ".keystore", ".asc", ".gpg", ".ppk", ".ovpn", ".kdbx", ".env"]);
 const NOMOS_DATA = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "nomos");
 
 // Read-only git (hardened after a binding adversarial pass found content-exfil,
