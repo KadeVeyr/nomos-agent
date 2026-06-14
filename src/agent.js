@@ -11,6 +11,7 @@ import path from "node:path";
 import { chat, chatStream } from "./gateway.js";
 import { makeTools } from "./tools.js";
 import { memoryTools, readNotes, readLessons, logRun } from "./memory.js";
+import { DEFAULT_POLICY, TOOL_CLASS, toolVerdict } from "./permissions.js";
 
 // Keep context bounded on long runs: when the transcript exceeds a char budget,
 // truncate the OLDEST tool observations (least relevant late in a run). The
@@ -75,7 +76,13 @@ How you work:
 
 When the task is complete, reply with a SHORT final answer — what you changed and how to verify — and NO tool call. Save anything reusable across sessions with the remember tool.`;
 
-export async function runAgent({ spec, task, root = process.cwd(), allowShell = false, allowFetch = false, maxSteps = 12, maxTokens, onEvent = () => {}, signal }) {
+export async function runAgent({ spec, task, root = process.cwd(), allowShell = false, allowFetch = false, policy = DEFAULT_POLICY, headless = true, maxSteps = 12, maxTokens, onEvent = () => {}, signal }) {
+  // Effective policy: start from the resolved policy, then let the legacy
+  // allowShell/allowFetch flags loosen shell/fetch (so existing callers are
+  // unchanged). The dispatch gate below enforces this for EVERY class.
+  const effectivePolicy = { ...DEFAULT_POLICY, ...policy };
+  if (allowShell) effectivePolicy.shell = "allow";
+  if (allowFetch) effectivePolicy.fetch = "allow";
   const tools = [...makeTools({ root, allowShell, allowFetch }), ...memoryTools(root)];
   const toolDefs = tools.map(({ run, ...def }) => def);
   const byName = Object.fromEntries(tools.map((t) => [t.name, t]));
@@ -131,9 +138,14 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
       let result;
       try {
         const tool = byName[call.name];
+        const verdict = tool ? toolVerdict(effectivePolicy, call.name, headless) : "deny";
         const req = tool?.parameters?.required || [];
         const missing = req.filter((k) => call.args == null || call.args[k] === undefined);
         if (!tool) result = `Unknown tool: ${call.name}`;
+        else if (verdict !== "allow") {
+          const cls = TOOL_CLASS[call.name] || "write";
+          result = `Permission denied: "${call.name}" (${cls} capability) is not enabled for this run (policy: ${verdict}). Do NOT retry it — tell the user it needs to be granted (e.g. --allow ${cls}${cls === "shell" ? " / --allow-shell" : cls === "fetch" ? " / --allow-fetch" : ""}) and continue with what you can do without it.`;
+        }
         else if (missing.length) result = `Missing required argument(s): ${missing.join(", ")}`;
         else result = await tool.run(call.args || {});
       } catch (e) {

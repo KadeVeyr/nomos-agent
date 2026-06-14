@@ -27,6 +27,7 @@ import { makeIo, runConnect, authMethods } from "../src/connect.js";
 import { listModels, CURATED } from "../src/models.js";
 import { runCouncil } from "../src/council.js";
 import { renderReceipt, writeReceipt, verifyReceiptHash, receiptIssues } from "../src/receipt.js";
+import { buildPolicy, policyFromEnv } from "../src/permissions.js";
 import { runSeat } from "../src/seat.js";
 import { getDiff, runVerify } from "../src/verify.js";
 
@@ -71,13 +72,27 @@ async function cmdRun() {
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (skip.has(a)) continue;
-    if (a === "-m" || a === "--model" || a === "--max-tokens") { i++; continue; }
+    if (a === "-m" || a === "--model" || a === "--max-tokens" || a === "--allow" || a === "--deny") { i++; continue; }
     parts.push(a);
   }
   let task = parts.join(" ");
   if (!task) task = await readStdin(); // pipeable: echo "task" | nomos run -m model
   if (!spec) return fail('No model. Use -m provider/model, or set defaultModel in nomos.json.');
   if (!task) return fail('Missing task. Usage: nomos run -m provider/model "task"');
+
+  // Per-tool permission policy. CLI --allow/--deny <class> (repeatable) + the
+  // legacy --allow-shell/--allow-fetch + NOMOS_POLICY_<CLASS> env; the project's
+  // own nomos.json `permissions` may only TIGHTEN (restrict-only). headless: run
+  // has no TTY, so any "ask" resolves to "deny" (a CI run never hangs).
+  const cliPolicy = {};
+  for (let i = 0; i < argv.length; i++) {
+    if ((argv[i] === "--allow" || argv[i] === "--deny") && argv[i + 1]) cliPolicy[argv[i + 1].toLowerCase()] = argv[i] === "--allow" ? "allow" : "deny";
+  }
+  if (has("--allow-shell")) cliPolicy.shell = "allow";
+  if (has("--allow-fetch")) cliPolicy.fetch = "allow";
+  let projectPerms = {};
+  try { projectPerms = JSON.parse(readFileSync(path.join(cfg.root, "nomos.json"), "utf8")).permissions || {}; } catch { /* none */ }
+  const policy = buildPolicy({ env: policyFromEnv(), cli: cliPolicy, project: projectPerms });
 
   // Header: which model, where (so the user knows the cwd + model before anything runs).
   if (!json) process.stderr.write(`\x1b[2m▸\x1b[0m \x1b[1m${spec}\x1b[0m \x1b[2m· ${cfg.root}${cfg.allowShell ? " · shell on" : ""}\x1b[0m\n`);
@@ -97,7 +112,7 @@ async function cmdRun() {
   };
 
   try {
-    const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, onEvent });
+    const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, policy, headless: true, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, onEvent });
     if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim() }) + "\n"); return; }
     process.stdout.write("\n"); // streamed deltas already printed the answer
     const parts = [];
