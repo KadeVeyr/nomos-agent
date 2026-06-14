@@ -1,0 +1,21 @@
+# Secrets must NEVER enter the repo. Keys live in ~/.local/share/nomos/auth.json.
+auth.json
+.env
+.env.*
+*.key
+*.pem
+
+# Per-project memory + session logs — local only, never committed.
+.nomos/
+
+# Per-project config is capability-bearing — review before committing.
+nomos.json
+
+# Node
+node_modules/
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log
