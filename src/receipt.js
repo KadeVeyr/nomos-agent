@@ -1,9 +1,19 @@
-// Receipt — the differentiator. A NOMOS receipt is a portable, hashable artifact
-// proving that a task's answer was checked by a DIFFERENT provider acting as an
-// adversarial verifier. OpenCode and Hermes run agents; neither emits a
-// cross-provider verification receipt as a native primitive. The receipt is the
-// headline: "ship the irreversible thing — here's proof an independent adversary
-// checked it." The cross-provider check that produces it is the mechanism.
+// Receipt — the differentiator. A NOMOS receipt is a portable, tamper-EVIDENT,
+// offline-re-checkable RECORD that a task's answer was checked by a DIFFERENT
+// provider acting as an adversarial verifier. OpenCode and Hermes run agents;
+// neither emits a cross-provider verification receipt as a native primitive.
+//
+// Be precise about what it is (full contract: docs/RECEIPT_SPEC.md). It is NOT a
+// signature: the hash is keyless content-addressing, so it proves a receipt
+// matches its own id/content and is unaltered since written — NOT who authored it.
+// Whoever generates a receipt can fabricate any field and recompute a matching
+// hash, so trust in a receipt is trust in its GENERATOR (e.g. your own CI). The
+// one thing that can't be flipped without changing the provider strings is
+// `cross_provider` (re-derived in verifyReceiptHash). It does not prove which
+// model actually ran, nor that the verifier did a thorough (non-rubber-stamp)
+// check. Used as a pinnable record from a generator you trust, no other agent
+// emits it natively; closing the zero-trust gap (signatures/attestation) is
+// future work.
 //
 // A receipt contains NO secrets — only models, the task, the outputs, the
 // verdict, and a content hash. It is safe to commit / hand to a third party.
