@@ -10,7 +10,7 @@ import { parseModels } from "../src/models.js";
 import { extractFinalSentinel, runSeat, packContext } from "../src/seat.js";
 import { parseVerdict } from "../src/council.js";
 import { makeReceipt, verifyReceiptHash, canonicalReceipt } from "../src/receipt.js";
-import { trimContext } from "../src/agent.js";
+import { trimContext, readProjectCommands } from "../src/agent.js";
 
 test("resolveRoute: kimi-for-coding = anthropic + x-api-key + version, no bearer", () => {
   const r = resolveRoute(PROVIDERS["kimi-for-coding"], { value: "sk-k123456789", method: "apikey" });
@@ -194,4 +194,29 @@ test("trimContext truncates old tool messages over budget", () => {
   const msgs = [{ role: "system", content: "s" }, { role: "user", content: "u" }, { role: "tool", content: "X".repeat(1000) }, { role: "tool", content: "Y".repeat(1000) }];
   trimContext(msgs, 500);
   assert.ok(msgs.reduce((s, m) => s + m.content.length, 0) <= 700);
+});
+
+test("readProjectCommands: reads nomos.json commands, sanitizes, ignores junk", () => {
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), "nomos-cmd-"));
+  assert.equal(readProjectCommands(d), null); // no nomos.json
+  fs.writeFileSync(path.join(d, "nomos.json"), JSON.stringify({
+    commands: {
+      test: "node --test",
+      build: "npm run build",
+      "weird key!": "should be dropped (bad key)",
+      deploy: "custom one\nwith newline and " + "x".repeat(300),
+      bogus: 123,
+    },
+  }));
+  const out = readProjectCommands(d);
+  assert.match(out, /- test: node --test/);
+  assert.match(out, /- build: npm run build/);
+  assert.match(out, /- deploy: custom one with newline/); // newline collapsed
+  assert.ok(!/weird key/.test(out)); // invalid key name dropped
+  assert.ok(!/bogus/.test(out)); // non-string dropped
+  assert.ok(out.split("\n").every((l) => l.length <= 210)); // length-capped values
+  // a nomos.json without a commands object → null
+  fs.writeFileSync(path.join(d, "nomos.json"), JSON.stringify({ maxSteps: 5 }));
+  assert.equal(readProjectCommands(d), null);
+  fs.rmSync(d, { recursive: true, force: true });
 });

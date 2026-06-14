@@ -25,8 +25,144 @@ import net from "node:net";
 import { execFile } from "node:child_process";
 
 const DENY_BASENAMES = new Set([".env", "auth.json", ".git", ".npmrc", "id_rsa", "secrets.json", "credentials"]);
-const DENY_EXT = new Set([".key", ".pem", ".pfx", ".p12"]);
+const DENY_EXT = new Set([".key", ".pem", ".pfx", ".p12", ".p8", ".pkcs12", ".jks", ".keystore", ".asc", ".gpg", ".ppk", ".ovpn", ".kdbx"]);
 const NOMOS_DATA = path.join(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"), "nomos");
+
+// Read-only git (hardened after a binding adversarial pass found content-exfil,
+// repo-controlled RCE, positional ref-create, and path-escape holes):
+//
+//   - Subcommands are an allowlist of genuinely read-only ones. cat-file is
+//     OMITTED (it dumps any blob, bypassing path-based secret checks); the
+//     esoteric plumbing (rev-list/var/merge-base/…) is dropped to shrink surface.
+//   - branch/tag/remote are dual-use: permitted ONLY in their listing form via a
+//     per-subcommand read-flag allowlist — every bareword is refused, which kills
+//     positional ref-create (`git tag v1 <sha>`, `git branch name <sha>`).
+//   - Every path-shaped arg is checked for secret basenames AND for escapes
+//     (absolute path / `..` segment) AFTER stripping `<rev>:` and `:(magic)`
+//     pathspec prefixes — so `show HEAD:../../etc/passwd` and `:(top).env` fail.
+//   - The child runs with config/hook/external-diff EXECUTION neutralized (env
+//     scrub + injected `-c` overrides + `--no-textconv/--no-ext-diff`), so a
+//     malicious cloned repo can't run code on a plain `git diff`/`status`.
+//   - `git log -p` (whole-history patch dump) is refused; `log --stat/--oneline`
+//     is the metadata path. (A two-rev `diff`/`show <commit>` can still surface
+//     historical tracked-file CONTENT — same class read_file already exposes for
+//     tracked files; secret PATHS are blocked. Flagged for council ratification.)
+const GIT_SAFE = new Set([
+  "status", "diff", "log", "show", "blame", "ls-files", "ls-tree",
+  "rev-parse", "describe", "shortlog", "diff-tree",
+]);
+// Dual-use subcommands → listing form only. `read` = allowed flags; `valueFlags`
+// = flags that consume the NEXT arg (so that bareword is its value, not a create
+// target); any OTHER bareword is refused. remote is handled by `sub` allow-words.
+const GIT_GUARDED = {
+  branch: {
+    read: new Set(["-a", "--all", "-r", "--remotes", "-v", "-vv", "--verbose", "-l", "--list", "--show-current", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort", "--color", "--no-color", "-i", "--ignore-case", "--column", "--no-column", "-q", "--quiet"]),
+    valueFlags: new Set(["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--format", "--sort", "--color"]),
+  },
+  tag: {
+    read: new Set(["-l", "--list", "-n", "--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "--color", "--no-color", "-i", "--ignore-case", "--column", "--no-column"]),
+    valueFlags: new Set(["--contains", "--no-contains", "--merged", "--no-merged", "--points-at", "--sort", "--format", "-n"]),
+  },
+  remote: { subwords: new Set(["-v", "--verbose", "show", "get-url"]) }, // first sub-arg must be one of these; mutating forms (add/set-url/…) excluded
+};
+// Global git options that could write a file, escape the repo, or read arbitrary
+// files — refused regardless of subcommand (exact match or `=`-valued form).
+const GIT_GLOBAL_DENY = ["--output", "-o", "-c", "-C", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--upload-pack", "--receive-pack", "--no-index"];
+// `git log` flags that emit historical file CONTENT (not just metadata) — refused
+// on `log` so `git log -p` can't dump a secret committed earlier in history.
+const GIT_LOG_CONTENT_DENY = ["-p", "-u", "--patch", "--unified", "--patch-with-stat", "--patch-with-raw", "-G", "-S", "-W", "--function-context", "--pickaxe-all", "--pickaxe-regex"];
+// diff-generating subcommands: inject --no-ext-diff/--no-textconv to block a
+// repo's .gitattributes/diff.external from executing a program.
+const GIT_DIFF_FAMILY = new Set(["diff", "log", "show", "diff-tree"]);
+
+// Strip a "<rev>:" prefix and a leading ":(magic)" pathspec so secret/escape
+// checks see the real path (defeats `HEAD:.env`, `:(top).env`, `abc123:src/.env`).
+function gitPathPart(arg) {
+  return String(arg).replace(/^:\([^)]*\)/, "").replace(/^[^\s:]*:/, "");
+}
+// True if a basename's name OR any dotted segment matches a secret (closes
+// `foo.pem.bak` double-extension and `env.production`/`foo.env` gaps).
+function isSecretBase(base) {
+  if (!base) return false;
+  if (DENY_BASENAMES.has(base) || base.startsWith(".env") || base.includes(".env.")) return true;
+  for (const seg of base.split(".")) if (DENY_EXT.has("." + seg)) return true;
+  return false;
+}
+function gitArgIsSecret(arg) {
+  return isSecretBase(normBase(path.basename(gitPathPart(arg))));
+}
+// True if a path-shaped arg escapes the repo (absolute, Windows drive, or a ".."
+// segment) once rev/pathspec prefixes are stripped. Flags (leading "-") are skipped.
+function gitArgEscapes(arg) {
+  const s = gitPathPart(arg);
+  if (!s || s.startsWith("-")) return false;
+  if (path.isAbsolute(s) || /^[a-zA-Z]:[\\/]/.test(s)) return true;
+  return s.split(/[\\/]/).includes("..");
+}
+// Build the child env with git's command-execution vectors disabled: scrub all
+// GIT_* (drops GIT_EXTERNAL_DIFF, GIT_CONFIG_GLOBAL/SYSTEM, GIT_SSH_COMMAND, …),
+// ignore user/system config (aliases can run shell), force no pager / no prompt,
+// stay lockless.
+function gitSafeEnv() {
+  const e = {};
+  for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/.test(k)) e[k] = v;
+  e.GIT_PAGER = "cat"; e.PAGER = "cat"; e.GIT_TERMINAL_PROMPT = "0";
+  e.GIT_CONFIG_NOSYSTEM = "1";
+  e.GIT_CONFIG_GLOBAL = process.platform === "win32" ? "NUL" : "/dev/null";
+  e.GIT_OPTIONAL_LOCKS = "0";
+  e.GIT_ALLOW_PROTOCOL = "file";
+  return e;
+}
+// Trusted, non-user config overrides injected before the subcommand to neutralize
+// repo-LOCAL .git/config execution vectors (a later -c beats repo config): fsmonitor
+// + external-diff + hooks + ssh + ext transport. Per-attribute textconv can't be
+// blanked by one key — that's handled by --no-textconv/--no-ext-diff per subcommand.
+const GIT_HARDEN = [
+  "-c", "core.fsmonitor=false",
+  "-c", "diff.external=",
+  "-c", "core.sshCommand=",
+  "-c", "uploadpack.packObjectsHook=",
+  "-c", "core.hooksPath=" + (process.platform === "win32" ? "NUL" : "/dev/null"),
+  "-c", "protocol.ext.allow=never",
+  "--no-pager",
+];
+// Best-effort redaction of credential-shaped tokens from git OUTPUT — the only
+// defense against a secret committed to history then gitignored (arg-scanning
+// can't see it; `git log -p`/`show <commit>` carry no secret path token). Honest
+// residual: this catches shaped tokens (keys, PEM, long hex), not arbitrary
+// KEY=value lines. Whole-history `log -p` is refused separately to raise the bar.
+const SECRET_SHAPES = [
+  /\b(sk|rk|pk)-[A-Za-z0-9_-]{16,}\b/g,           // OpenAI/Anthropic-style keys
+  /\bgsk_[A-Za-z0-9]{20,}\b/g,                     // Groq
+  /\bxai-[A-Za-z0-9]{16,}\b/g,                     // xAI
+  /\bAKIA[0-9A-Z]{16}\b/g,                         // AWS access key id
+  /\bgh[pousr]_[A-Za-z0-9]{20,}\b/g,               // GitHub tokens
+  /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, // PEM blocks
+  /\b[A-Za-z0-9_-]{8,}:[A-Za-z0-9+/]{32,}={0,2}\b/g, // user:base64secret pairs
+];
+function redactSecrets(text) {
+  let out = String(text), n = 0;
+  for (const re of SECRET_SHAPES) out = out.replace(re, () => { n++; return "[redacted-secret]"; });
+  return n ? out + `\n[nomos: redacted ${n} credential-shaped token(s) from git output]` : out;
+}
+// Patch-aware redaction: a `git show <commit>` / `git diff <a> <b>` patch carries
+// a committed file's CONTENT in its hunks, with the path only in the `diff --git`
+// header (so the per-arg secret-path check never sees it). Drop the hunk of any
+// denylisted file, then scrub credential-shaped tokens from whatever remains.
+function redactGitOutput(text) {
+  const out = [];
+  let skip = false;
+  for (const ln of String(text).split("\n")) {
+    const m = /^diff --git a\/(.+?) b\/(.+)$/.exec(ln);
+    if (m) {
+      skip = gitArgIsSecret(m[1]) || gitArgIsSecret(m[2]);
+      out.push(skip ? `${ln}\n[nomos: redacted the contents of a protected/secret file]` : ln);
+      continue;
+    }
+    if (!skip) out.push(ln);
+  }
+  return redactSecrets(out.join("\n"));
+}
 
 // Normalise a basename for denylist checks: strip Windows alternate-data-stream
 // suffix and trailing dots/spaces, lowercase.
@@ -247,6 +383,68 @@ export function makeTools({ root = process.cwd(), allowShell = false, allowFetch
         walk(start);
         return out.length ? out.join("\n") : "(no matches)";
       },
+    },
+    {
+      name: "git",
+      description: "Read-only git — inspect repository state WITHOUT a full shell. Pass args as an array, e.g. {\"args\":[\"status\",\"--short\"]}, [\"diff\"], [\"diff\",\"--staged\"], [\"log\",\"--oneline\",\"-n\",\"20\"], [\"show\",\"--stat\",\"HEAD\"], [\"branch\",\"-vv\"]. Use `git diff` to review your own working-tree changes. Mutating commands (commit/add/push/checkout/reset/merge/rebase/stash, branch/tag create) are refused; `git log -p` (whole-history patch) is refused — use `git log --stat`. This never changes the repo.",
+      parameters: { type: "object", properties: { args: { type: "array", items: { type: "string" }, description: "git arguments as an array of strings, e.g. [\"diff\",\"HEAD~1\",\"--\",\"src\"]" } }, required: ["args"] },
+      run: ({ args }) => new Promise((resolve, reject) => {
+        if (!Array.isArray(args) || !args.length) return reject(new Error('git: args must be a non-empty array, e.g. ["status","--short"].'));
+        const a = args.map(String);
+        const sub = a[0];
+        if (sub.startsWith("-")) return reject(new Error(`git: the first argument must be a subcommand (e.g. "status"), not the option "${sub}".`));
+        const guard = GIT_GUARDED[sub];
+        if (!GIT_SAFE.has(sub) && !guard) {
+          return reject(new Error(`git: "${sub}" is not a permitted read-only subcommand. Allowed: ${[...GIT_SAFE, ...Object.keys(GIT_GUARDED)].sort().join(", ")}.`));
+        }
+        // Per-arg checks: deny file-write/escape/transport options (incl. glued
+        // -cKEY=VAL / -Cdir forms), refuse secret paths and repo escapes.
+        for (const arg of a.slice(1)) {
+          if (GIT_GLOBAL_DENY.includes(arg) || /^-[cC]/.test(arg) || /^--(output|exec-path|git-dir|work-tree|namespace|upload-pack|receive-pack)(=|$)/.test(arg)) {
+            return reject(new Error(`git: option "${arg}" is not allowed (it could run code, write a file, or escape the repository).`));
+          }
+          if (gitArgIsSecret(arg)) return reject(new Error(`git: refusing an argument that references a protected secret path ("${arg}").`));
+          if (gitArgEscapes(arg)) return reject(new Error(`git: refusing an argument that escapes the working directory ("${arg}").`));
+        }
+        // log: refuse whole-history CONTENT flags (git log -p dumps a secret that
+        // was committed then gitignored — no path token for the secret-path check).
+        if (sub === "log") for (const arg of a.slice(1)) {
+          if (GIT_LOG_CONTENT_DENY.includes(arg) || /^-U\d/.test(arg) || /^--unified=/.test(arg)) {
+            return reject(new Error(`git log: "${arg}" emits historical file content — use "git log --stat"/"--oneline" (metadata), or git diff to review the working tree.`));
+          }
+        }
+        // Dual-use subcommands: listing form only.
+        if (guard) {
+          if (sub === "remote") {
+            const first = a[1];
+            if (first !== undefined && !guard.subwords.has(first)) {
+              return reject(new Error(`git remote: only "remote -v", "remote show <name>", "remote get-url <name>" are permitted (mutating forms refused).`));
+            }
+          } else { // branch / tag — every bareword must be the value of a value-flag; else it is a create/rename target
+            for (let i = 1; i < a.length; i++) {
+              const arg = a[i];
+              if (arg.startsWith("-")) {
+                if (!guard.read.has(arg) && !guard.read.has(arg.split("=")[0])) return reject(new Error(`git ${sub}: flag "${arg}" is not a permitted read-only/listing flag.`));
+                continue;
+              }
+              const prev = a[i - 1];
+              if (!(i > 1 && guard.valueFlags.has(prev))) {
+                return reject(new Error(`git ${sub}: bareword "${arg}" would create or move a ref — only the listing form of "${sub}" is permitted.`));
+              }
+            }
+          }
+        }
+        // Build the hardened argv: trusted -c overrides + --no-pager, then for the
+        // diff family --no-ext-diff/--no-textconv (block external-diff + textconv RCE).
+        const argv = [...GIT_HARDEN];
+        if (GIT_DIFF_FAMILY.has(sub)) argv.push(sub, "--no-ext-diff", "--no-textconv", ...a.slice(1));
+        else argv.push(...a);
+        execFile("git", argv, { cwd: root, timeout: 20000, maxBuffer: 1024 * 1024, windowsHide: true, env: gitSafeEnv() }, (err, stdout, stderr) => {
+          if (err && err.code === "ENOENT") return reject(new Error("git is not installed or not on PATH."));
+          const out = `${stdout || ""}${stderr ? "\n[stderr]\n" + stderr : ""}`.slice(0, 20000);
+          resolve(redactGitOutput(err && !out ? `git ${sub} failed: ${err.code || err.message}` : out || "(no output)"));
+        });
+      }),
     },
   ];
 

@@ -36,18 +36,42 @@ function readProjectGuide(root) {
   return null;
 }
 
+// Project test/build commands — a `nomos.json` { "commands": { test, build,
+// lint, typecheck, format, … } } convention. Surfaced in the system prompt so
+// the agent uses the repo's CANONICAL commands instead of guessing how to verify
+// its work. Reading them is purely informational: actually running one still
+// requires run_shell to be enabled, so a cloned repo can't execute anything by
+// merely listing a command here. Values are single-lined + length-capped so a
+// repo can't inject extra system-prompt instructions through them.
+const COMMAND_KEYS = ["install", "build", "test", "lint", "typecheck", "format", "dev", "start", "run", "check", "e2e"];
+export function readProjectCommands(root) {
+  let cfg;
+  try { cfg = JSON.parse(fs.readFileSync(path.join(root, "nomos.json"), "utf8")); } catch { return null; }
+  const c = cfg && cfg.commands;
+  if (!c || typeof c !== "object") return null;
+  const clean = (v) => String(v).replace(/\s+/g, " ").trim().slice(0, 200);
+  const lines = [];
+  for (const k of COMMAND_KEYS) if (typeof c[k] === "string" && c[k].trim()) lines.push(`- ${k}: ${clean(c[k])}`);
+  for (const [k, v] of Object.entries(c)) { // allow extra custom commands, capped
+    if (!COMMAND_KEYS.includes(k) && typeof v === "string" && v.trim() && lines.length < 20 && /^[\w.-]{1,32}$/.test(k)) lines.push(`- ${k}: ${clean(v)}`);
+  }
+  return lines.length ? lines.join("\n") : null;
+}
+
 const SYSTEM = `You are Nomos, a precise coding agent working inside a user's repository. Tools you have:
 - read_file, list_dir, glob (find files by pattern), search (regex over file contents) — explore the codebase BEFORE you act. Never guess a file's contents.
 - edit_file — a TARGETED edit (replace an exact substring). multi_edit — several edits to one file at once. PREFER these over write_file when changing an existing file; match whitespace exactly.
 - write_file — create a new file or fully replace one.
+- git — READ-ONLY git (status, diff, log, show, branch, blame, …). Use it to see what you've changed (git diff), the repo state (git status --short), and history. It never mutates the repo, and it works WITHOUT run_shell.
 - remember, recall — durable notes across sessions.
-- fetch_url, run_shell — only when enabled. With run_shell you can run the build, tests, git, and CLIs.
+- fetch_url, run_shell — only when enabled. With run_shell you can run the build, tests, and CLIs (use the read-only git tool above for git instead of run_shell).
 
 How you work:
 1. EXPLORE first — read the relevant files and search for the symbols you'll touch. Don't assume.
 2. Make the smallest correct change. Use edit_file for surgical edits.
-3. VERIFY — if run_shell is enabled, run the build/tests and fix what you broke before declaring done.
-4. File and shell tools are confined to the working directory; secret files (.env, keys, auth.json) are blocked in code.
+3. REVIEW your own diff with git diff before finishing — confirm you changed exactly what you intended and nothing else.
+4. VERIFY — if run_shell is enabled, run the project's test/build command (see PROJECT COMMANDS if present) and fix what you broke before declaring done.
+5. File and shell tools are confined to the working directory; secret files (.env, keys, auth.json) are blocked in code.
 
 When the task is complete, reply with a SHORT final answer — what you changed and how to verify — and NO tool call. Save anything reusable across sessions with the remember tool.`;
 
@@ -59,8 +83,10 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
   const lessons = readLessons();
   const notes = readNotes(root);
   const guide = readProjectGuide(root);
+  const commands = readProjectCommands(root);
   let system = SYSTEM;
   if (guide) system += `\n\nPROJECT CONVENTIONS (${guide.name} — read and follow these for this repo):\n${guide.text.slice(0, 8000)}`;
+  if (commands) system += `\n\nPROJECT COMMANDS (from nomos.json — the canonical way to build/test/lint THIS repo). Prefer these EXACT commands over guessing; run them with run_shell when it is enabled, and after changing code VERIFY with the test (or build) command before declaring done:\n${commands}`;
   if (lessons) system += `\n\nYour durable LESSONS from past runs (guidance you wrote — apply it, but it NEVER overrides your safety rules or tool limits, which are enforced in code, not here):\n${lessons}`;
   if (notes) system += `\n\nDurable notes for THIS project:\n${notes}`;
   const messages = [
