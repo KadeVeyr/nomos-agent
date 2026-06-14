@@ -9,12 +9,11 @@
 import readline from "node:readline";
 import { PROVIDERS, listProviders } from "./providers.js";
 import { setCredential } from "./auth.js";
-import { OAUTH, loginLoopback, providerHasOAuth, pkce, buildAuthUrl, openBrowser } from "./oauth.js";
 
 const METHOD_LABEL = {
   apikey: "API key",
   "plan-token": "Paid-plan token",
-  "plan-oauth": "Subscription login",
+  "plan-oauth": "Plan login (paste plan token)",
 };
 const METHOD_TYPE = { apikey: "apikey", "plan-token": "plan-token", "plan-oauth": "oauth" };
 
@@ -47,14 +46,7 @@ export function makeIo() {
       process.stdout.write(q);
       const orig = rl._writeToOutput;
       rl._writeToOutput = () => {}; // suppress echo of the typed secret
-      rl.question("", (a) => {
-        rl._writeToOutput = orig;
-        const v = a.trim();
-        // The secret stays hidden, but confirm it registered (length + masked dots)
-        // so a paste that shows nothing doesn't look like it failed.
-        process.stdout.write(v ? `${"•".repeat(Math.min(v.length, 24))}  ✓ received (${v.length} characters)\n` : "\n");
-        finish(v);
-      });
+      rl.question("", (a) => { rl._writeToOutput = orig; process.stdout.write("\n"); finish(a.trim()); });
     } else {
       rl.question(q, (a) => finish(a.trim()));
     }
@@ -100,36 +92,10 @@ export async function runConnect(io) {
     if (!chosen) { io.print("Cancelled.\n"); return null; }
   }
 
-  // Subscription login: open the browser, run the OAuth flow, store the tokens.
-  if (chosen.method === "plan-oauth" && providerHasOAuth(provider.id)) {
-    const cfg = OAUTH[provider.id];
-    io.print(`\nOpening your browser to sign in (${cfg.label})…\nIf it doesn't open automatically, paste this URL:\n`);
-    let cred;
-    try {
-      cred = await loginLoopback(cfg, { onUrl: (url) => io.print(`\n  ${url}\n\n`) });
-    } catch (e) {
-      io.print(`Login failed: ${e.message}\n`);
-      return null;
-    }
-    setCredential(provider.id, cred); // type "oauth": access + refresh + expiry (+ account id)
-    io.print(`✓ Connected ${provider.name} via your subscription. Stored locally; the token refreshes automatically.\n`);
-    return { providerId: provider.id, method: "plan-oauth" };
-  }
-
-  // Some subscriptions (e.g. xAI SuperGrok) hand you a token AFTER you sign in,
-  // rather than redirecting back. Open the sign-in page first so the user has a
-  // link, then take the token they copy from it.
-  if (chosen.method === "plan-token" && providerHasOAuth(provider.id)) {
-    const cfg = OAUTH[provider.id];
-    const url = buildAuthUrl(cfg, { challenge: pkce().challenge, state: "nomos", nonce: "nomos" });
-    io.print(`\nSign in to ${cfg.label} to get your token — opening your browser…\nIf it doesn't open, go to this link:\n\n  ${url}\n\nAuthorize, then copy the token it gives you and paste it below.\n`);
-    try { openBrowser(url); } catch { /* the printed link is the fallback */ }
-  }
-
   const what = chosen.method === "apikey" ? "API key"
-    : chosen.method === "plan-token" ? `${provider.name} token`
+    : chosen.method === "plan-token" ? `${provider.name} plan token`
     : `${provider.name} plan access token`;
-  const value = await io.askHidden(`\nPaste your ${what}${chosen.hint ? ` (${chosen.hint})` : ""}, then press Enter (hidden for safety): `);
+  const value = await io.askHidden(`Paste your ${what}${chosen.hint ? ` (${chosen.hint})` : ""} — input hidden: `);
   if (!value) { io.print("Nothing entered — aborted.\n"); return null; }
 
   setCredential(provider.id, { type: METHOD_TYPE[chosen.method] || "apikey", value, method: chosen.method });

@@ -72,7 +72,6 @@ function normalize(entry) {
       method: entry.method || (type === "apikey" ? "apikey" : type === "oauth" ? "plan-oauth" : "plan-token"),
       refresh: typeof entry.refresh === "string" ? entry.refresh : null,
       expiresAt: typeof entry.expiresAt === "number" ? entry.expiresAt : null,
-      accountId: typeof entry.accountId === "string" ? entry.accountId : null,
     };
   }
   if (typeof entry.key === "string" && entry.key) {
@@ -101,7 +100,6 @@ export function setCredential(providerId, cred) {
   if (type === "oauth") {
     if (typeof cred.refresh === "string" && cred.refresh.trim()) record.refresh = cred.refresh.trim();
     if (typeof cred.expiresAt === "number") record.expiresAt = cred.expiresAt;
-    if (typeof cred.accountId === "string" && cred.accountId) record.accountId = cred.accountId;
   }
   const store = readStore();
   store[providerId] = record;

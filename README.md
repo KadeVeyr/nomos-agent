@@ -34,8 +34,6 @@ Fixed the off-by-one in sum.js (loop started at 1, skipping the first element).
 
 `nomos providers` lists them. Direct APIs: `anthropic`, `openai`, `google` (Gemini), `moonshot` (Kimi), `deepseek`, `groq`, `openrouter`, `xai` (Grok), `zai` (GLM), `dashscope` (Qwen), `minimax`, `ollama` (local). Coding-plan subscriptions on their own endpoints (the same ids OpenCode uses): `kimi-for-coding`, `zai-coding-plan`, `opencode-go`.
 
-**Subscription login** — use your existing plan instead of API credits. `nomos connect` → `openai` opens a browser sign-in (ChatGPT Plus/Pro, token auto-refreshes); `xai` is a paste (SuperGrok hands you a token after sign-in). See [docs/PLAN_OAUTH.md](docs/PLAN_OAUTH.md).
-
 ```sh
 nomos connect                  # provider → method → paste secret (hidden); plan token OR API key
 nomos models                   # live model list per connected provider (fetched with your key)
@@ -138,7 +136,7 @@ This is "patterns matched, known holes closed," **not** a third-party audit. Fou
 ```sh
 git clone <repo> nomos-agent && cd nomos-agent
 npm link            # or: node bin/nomos.js …
-npm test            # 64 tests, zero dependencies
+npm test            # 49 tests, zero dependencies
 ```
 
 Node 18+. **Zero runtime dependencies.** See [CHANGELOG.md](CHANGELOG.md).
