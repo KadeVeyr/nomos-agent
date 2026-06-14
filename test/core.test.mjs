@@ -9,7 +9,7 @@ import { PROVIDERS, resolveModel } from "../src/providers.js";
 import { parseModels } from "../src/models.js";
 import { extractFinalSentinel, runSeat, packContext } from "../src/seat.js";
 import { parseVerdict } from "../src/council.js";
-import { makeReceipt, verifyReceiptHash, canonicalReceipt } from "../src/receipt.js";
+import { makeReceipt, verifyReceiptHash, canonicalReceipt, receiptIssues, RECEIPT_VERSION } from "../src/receipt.js";
 import { trimContext, readProjectCommands } from "../src/agent.js";
 
 test("resolveRoute: kimi-for-coding = anthropic + x-api-key + version, no bearer", () => {
@@ -127,6 +127,30 @@ test("verifyReceiptHash: a recomputed-hash forge of cross_provider is still caug
   // the hash now matches the forged content, but re-deriving cross_provider from
   // the (equal) providers exposes the lie — independence can't be faked
   assert.ok(!verifyReceiptHash(forged));
+});
+
+test("receipt v1.0 is locked, and a fresh receipt is intact + complete", () => {
+  assert.equal(RECEIPT_VERSION, "1.0");
+  const r = makeReceipt({ task: "t", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "looks right" }, ts: "2020" });
+  assert.equal(r.nomos_receipt, "1.0");
+  assert.ok(verifyReceiptHash(r));
+  assert.deepEqual(receiptIssues(r), []); // complete
+});
+
+test("receiptIssues catches a TRUNCATED verdict (the 3rd failure mode) + missing identity", () => {
+  const base = makeReceipt({ task: "t", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "r" }, ts: "2020" });
+  // a cut-off verifier reply that never reached a verdict must NOT read as valid
+  const truncated = { ...base, verifier: { ...base.verifier, verdict: "PAS" } };
+  assert.ok(receiptIssues(truncated).some((s) => /verdict/.test(s)));
+  const noReason = { ...base, verifier: { ...base.verifier, reasoning: "  " } };
+  assert.ok(receiptIssues(noReason).some((s) => /reasoning/.test(s)));
+  const noProvider = { ...base, verifier: { model: "b/y", verdict: "PASS", reasoning: "r" } };
+  assert.ok(receiptIssues(noProvider).some((s) => /verifier\.provider/.test(s)));
+  const noTask = { ...base, task: "" };
+  assert.ok(receiptIssues(noTask).some((s) => /task/.test(s)));
+  // an empty/garbage object is reported, never thrown
+  assert.ok(receiptIssues(null).length);
+  assert.ok(receiptIssues({}).length);
 });
 
 test("runSeat: ok + empty transcripts (mocked)", async () => {

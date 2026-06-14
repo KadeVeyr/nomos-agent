@@ -26,7 +26,7 @@ import { startTui } from "../src/tui.js";
 import { makeIo, runConnect, authMethods } from "../src/connect.js";
 import { listModels, CURATED } from "../src/models.js";
 import { runCouncil } from "../src/council.js";
-import { renderReceipt, writeReceipt, verifyReceiptHash } from "../src/receipt.js";
+import { renderReceipt, writeReceipt, verifyReceiptHash, receiptIssues } from "../src/receipt.js";
 import { runSeat } from "../src/seat.js";
 import { getDiff, runVerify } from "../src/verify.js";
 
@@ -278,18 +278,22 @@ function cmdReceipt() {
   let receipt;
   try { receipt = JSON.parse(readFileSync(argv[2], "utf8")); }
   catch (e) { return fail(`can't read receipt: ${e.message}`); }
-  const intact = verifyReceiptHash(receipt);
+  const intact = verifyReceiptHash(receipt); // tamper + same-provider-faked-as-cross
+  const issues = receiptIssues(receipt);     // truncated/missing verdict + schema
+  const ok = intact && issues.length === 0;
   if (has("--json")) {
     // Emit the HASH-BOUND verdict (verifier.verdict), not the denormalized
     // top-level copy — so a script reading .verdict can't be fed a tampered value
-    // (it's still gated by intact:false + exit 2, this is defense-in-depth).
-    process.stdout.write(JSON.stringify({ id: receipt.id, intact, cross_provider: !!receipt.cross_provider, verdict: receipt.verifier?.verdict ?? receipt.verdict }) + "\n");
-  } else if (intact) {
-    process.stdout.write(`\x1b[32m✓ intact\x1b[0m receipt ${receipt.id ?? "?"} — verifier ${receipt.verifier?.model ?? "?"} · verdict ${receipt.verifier?.verdict ?? "?"}${receipt.cross_provider ? " · \x1b[32mcross-provider\x1b[0m" : " · \x1b[31m⚠ same provider\x1b[0m"}\n`);
-  } else {
+    // (it's still gated by ok:false + exit 2, this is defense-in-depth).
+    process.stdout.write(JSON.stringify({ id: receipt.id, ok, intact, issues, cross_provider: !!receipt.cross_provider, verdict: receipt.verifier?.verdict ?? receipt.verdict }) + "\n");
+  } else if (!intact) {
     process.stdout.write(`\x1b[31m✗ TAMPERED\x1b[0m receipt ${receipt.id ?? "?"} — content hash does not match. Do not trust it.\n`);
+  } else if (issues.length) {
+    process.stdout.write(`\x1b[31m✗ INCOMPLETE\x1b[0m receipt ${receipt.id ?? "?"} — hash intact but: ${issues.join("; ")}.\n`);
+  } else {
+    process.stdout.write(`\x1b[32m✓ intact\x1b[0m receipt ${receipt.id ?? "?"} — verifier ${receipt.verifier?.model ?? "?"} · verdict ${receipt.verifier?.verdict ?? "?"}${receipt.cross_provider ? " · \x1b[32mcross-provider\x1b[0m" : " · \x1b[31m⚠ same provider — not independent\x1b[0m"}\n`);
   }
-  if (!intact) process.exitCode = 2;
+  if (!ok) process.exitCode = 2;
 }
 
 async function cmdMcp() {

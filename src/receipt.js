@@ -12,7 +12,17 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 
-export const RECEIPT_VERSION = "0.2"; // 0.2 binds the proposer/verifier MODEL+PROVIDER (not just the verdict) into the hash
+// 1.0 is the LOCKED public schema (see docs/RECEIPT_SPEC.md). The canonical
+// pre-image (canonicalReceipt), the sha256, the 12-hex id, and the cross_provider
+// re-derivation are stable — a third party can re-implement the check from the
+// spec and verify any 1.0 receipt offline, forever. Binds proposer/verifier
+// MODEL+PROVIDER (not just the verdict) into the hash.
+export const RECEIPT_VERSION = "1.0";
+
+// The only verdicts a complete receipt may carry. A receipt whose verifier verdict
+// is anything else is treated as truncated/malformed (a cut-off verifier reply that
+// never reached a verdict must not read as success).
+export const VALID_VERDICTS = new Set(["PASS", "FAIL", "CONCERNS"]);
 
 function receiptDir(root) {
   return path.join(root, ".nomos", "receipts");
@@ -93,6 +103,25 @@ export function verifyReceiptHash(receipt) {
     r.id === String(r.hash || "").slice(0, 12) &&
     r.cross_provider === (r.proposer?.provider !== r.verifier?.provider);
   return hashOk && consistent;
+}
+
+// Completeness/schema check, INDEPENDENT of the hash. A receipt can be intact
+// (hash matches its content) yet incomplete — a truncated verifier reply that
+// never reached a verdict, or a missing model/provider id. verifyReceiptHash
+// catches tampering; this catches a malformed/cut-off receipt that would
+// otherwise read as a valid pass. Returns a list of problems; empty = well-formed.
+export function receiptIssues(r) {
+  if (!r || typeof r !== "object") return ["receipt is not an object"];
+  const issues = [];
+  for (const side of ["proposer", "verifier"]) {
+    if (!r[side] || typeof r[side] !== "object") { issues.push(`${side} block missing`); continue; }
+    if (!r[side].model) issues.push(`${side}.model missing`);
+    if (!r[side].provider) issues.push(`${side}.provider missing`);
+  }
+  if (!VALID_VERDICTS.has(r.verifier?.verdict)) issues.push(`verifier.verdict "${r.verifier?.verdict ?? ""}" is not PASS/FAIL/CONCERNS (truncated or missing verdict)`);
+  if (!r.verifier?.reasoning || !String(r.verifier.reasoning).trim()) issues.push("verifier.reasoning is empty (truncated verdict)");
+  if (r.task == null || String(r.task).trim() === "") issues.push("task missing");
+  return issues;
 }
 
 // Human-readable one-block summary for the terminal.
