@@ -473,9 +473,19 @@ export function makeTools({ root = process.cwd(), allowShell = false, allowFetch
       parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
       run: ({ command }) =>
         new Promise((resolve) => {
-          const shell = process.platform === "win32" ? "cmd.exe" : "/bin/sh";
-          const flag = process.platform === "win32" ? "/c" : "-c";
-          execFile(shell, [flag, String(command)], { cwd: root, timeout: 20000, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+          // Run the command from a TEMP SCRIPT FILE rather than inline. Passing a
+          // quote-heavy command to `cmd.exe /c "<command>"` mangles nested
+          // double-quotes (verified: `node -e "import('./x')…"` printed nothing
+          // inline but works from a script). Writing the exact command to a script
+          // preserves its quoting on both platforms.
+          const win = process.platform === "win32";
+          const file = path.join(os.tmpdir(), `nomos-sh-${process.pid}-${Date.now()}${win ? ".cmd" : ".sh"}`);
+          try { fs.writeFileSync(file, win ? `@echo off\r\n${command}\r\n` : `${command}\n`); }
+          catch (e) { return resolve(`Command failed: could not stage the command (${e.message})`); }
+          const shell = win ? (process.env.ComSpec || "cmd.exe") : "/bin/sh";
+          const args = win ? ["/d", "/c", file] : [file];
+          execFile(shell, args, { cwd: root, timeout: 20000, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
+            try { fs.unlinkSync(file); } catch { /* best effort */ }
             const out = `${stdout || ""}${stderr ? "\n[stderr]\n" + stderr : ""}`.slice(0, 20000);
             resolve(err && !out ? `Command failed: ${err.code || err.message}` : out || "(no output)");
           });

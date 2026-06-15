@@ -32,7 +32,7 @@ export function getDiff({ root = process.cwd(), staged = false, against = null }
 }
 
 // Verify a diff with ONE model. Returns { receipt, verdict, reasoning }.
-export async function runVerify({ diff, spec, source = "your editor", timeoutMs = 120000, maxTokens, prev = null, codeSnapshot = null }, deps = {}) {
+export async function runVerify({ diff, spec, source = "your editor", proposerProvider = "external", timeoutMs = 120000, maxTokens, prev = null, codeSnapshot = null }, deps = {}) {
   const _chat = deps.chat || chat;
   const now = deps.now || (() => new Date().toISOString());
   const { providerId } = resolveModel(spec);
@@ -71,7 +71,7 @@ export async function runVerify({ diff, spec, source = "your editor", timeoutMs 
   // independent verifier. cross_provider is true by construction (external ≠ nomos provider).
   const receipt = makeReceipt({
     task: `independent review of a change (${source})`,
-    proposer: { model: source, provider: "external", output: diff },
+    proposer: { model: source, provider: proposerProvider, output: diff },
     verifier: { model: spec, provider: providerId, verdict, reasoning },
     ts: now(),
     prev, // chain link, supplied by the caller (which knows the receipt dir)

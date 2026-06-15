@@ -88,6 +88,18 @@ test("run_shell / fetch_url are opt-in", () => {
   fs.rmSync(d, { recursive: true, force: true });
 });
 
+test("run_shell runs a nested-quote command via a temp script (no cmd.exe mangling)", async () => {
+  const d = tmpRepo();
+  const sh = makeTools({ root: d, allowShell: true }).find((t) => t.name === "run_shell");
+  // a double-quoted -e arg with a single-quoted string inside — the exact shape
+  // that printed nothing through inline `cmd.exe /c` on Windows; now it works.
+  const out = await sh.run({ command: `node -e "console.log('quoted-ok:' + (1+1))"` });
+  assert.match(out, /quoted-ok:2/);
+  // a plain command still works
+  assert.match(await sh.run({ command: "echo hello-shell" }), /hello-shell/);
+  fs.rmSync(d, { recursive: true, force: true });
+});
+
 test("git tool is always available (NOT opt-in, unlike run_shell)", () => {
   const d = tmpRepo();
   assert.equal(makeTools({ root: d }).some((t) => t.name === "git"), true);

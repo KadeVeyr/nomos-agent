@@ -210,30 +210,41 @@ export function auditChain(receipts) {
   if (heads.length !== 1) errors.push(`expected exactly one head, found ${heads.length}`);
 
   let head = null;
+  const chain = []; // genesis → head order, so callers can tell the forensic story
   if (!errors.length) {
     const seen = new Set();
     let cur = genesis[0];
     while (cur) {
       if (seen.has(cur.hash)) { errors.push(`cycle at ${cur.id}`); break; }
-      seen.add(cur.hash);
+      seen.add(cur.hash); chain.push(cur);
       const kids = childrenOf.get(cur.hash) || [];
       if (!kids.length) { head = cur; break; }
       cur = kids[0];
     }
     if (!errors.length && seen.size !== nodes.length) errors.push(`chain covers ${seen.size}/${nodes.length} receipts — ${nodes.length - seen.size} detached`);
   }
-  return { ok: errors.length === 0, head: head ? head.id : null, length: nodes.length, errors };
+  return { ok: errors.length === 0, head: head ? head.id : null, length: nodes.length, chain, errors };
 }
 
-// Human-readable one-block summary for the terminal.
+// Render a receipt HONESTLY (Da Vinci masterpiece council, binding adversarial
+// veto on over-claim). The receipt describes an EVENT — "a second model reviewed
+// this work" — it does NOT assert the code is correct/blessed. So: a NEUTRAL △
+// marks the cross-check (never a green ✓, which would borrow CI's "guaranteed"
+// grammar); the verdict is scoped to the actor ("agreed — no issues flagged"),
+// not "PASS/verified"; ✓ is reserved strictly for the cryptographic fact that the
+// content hash matches; and a mandatory footer states what was NOT proven.
 export function renderReceipt(r) {
-  const mark = r.verdict === "PASS" ? "\x1b[32m✓\x1b[0m" : r.verdict === "FAIL" ? "\x1b[31m✗\x1b[0m" : "\x1b[33m‼\x1b[0m";
-  const cross = r.cross_provider ? "\x1b[32mcross-provider\x1b[0m" : "\x1b[31m⚠ SAME provider — not independent\x1b[0m";
+  const v = r.verifier || {}, p = r.proposer || {};
+  const word = r.verdict === "PASS" ? "agreed — no issues flagged" : r.verdict === "FAIL" ? "flagged issues" : "raised concerns";
+  const color = r.verdict === "FAIL" ? "\x1b[33m" : "\x1b[0m"; // not green — agreement is not a guarantee
+  const indep = r.cross_provider ? `${p.provider || "?"} → ${v.provider || "?"}, independent` : `\x1b[31m⚠ same provider (${v.provider || "?"}) — NOT an independent check\x1b[0m`;
+  const reason = String(v.reasoning || "").replace(/\s+/g, " ").trim().slice(0, 150);
   return [
-    `\x1b[2m──\x1b[0m NOMOS receipt \x1b[1m${r.id}\x1b[0m \x1b[2m──\x1b[0m`,
-    `  proposer : ${r.proposer.model}`,
-    `  verifier : ${r.verifier.model}  (${cross})`,
-    `  verdict  : ${mark} \x1b[1m${r.verdict}\x1b[0m`,
-    `  hash     : ${r.hash.slice(0, 16)}…`,
-  ].join("\n");
+    `\x1b[2m──\x1b[0m \x1b[1m△ cross-checked\x1b[0m \x1b[2m· receipt ${r.id}\x1b[0m`,
+    `  ${v.model || "?"} reviewed ${p.model || "?"}'s work  \x1b[2m(${indep}\x1b[2m)\x1b[0m`,
+    `  ${color}${word}\x1b[0m${reason ? ` \x1b[2m— ${reason}\x1b[0m` : ""}`,
+    r.code_snapshot ? `  \x1b[2mbound to code ${String(r.code_snapshot).slice(0, 12)}\x1b[0m` : null,
+    `  \x1b[2mre-checkable offline · not a certification · trust terminates at the generator\x1b[0m`,
+    `  \x1b[2m\`nomos receipt verify\` re-checks the hash · \`nomos audit\` walks the chain\x1b[0m`,
+  ].filter(Boolean).join("\n");
 }

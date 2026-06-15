@@ -69,12 +69,12 @@ async function cmdRun() {
   const cfg = loadConfig({ cli: { allowShell: has("--allow-shell") ? true : undefined, allowFetch: has("--allow-fetch") ? true : undefined, maxTokens: getInt("--max-tokens") } });
   const spec = getFlag("--model", "-m") || cfg.defaultModel;
   const json = has("--json");
-  const skip = new Set(["run", "--json", "--allow-shell", "--allow-fetch"]);
+  const skip = new Set(["run", "--json", "--allow-shell", "--allow-fetch", "--verify"]);
   const parts = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (skip.has(a)) continue;
-    if (a === "-m" || a === "--model" || a === "--max-tokens" || a === "--allow" || a === "--deny") { i++; continue; }
+    if (a === "-m" || a === "--model" || a === "--max-tokens" || a === "--allow" || a === "--deny" || a === "--verifier") { i++; continue; }
     parts.push(a);
   }
   let task = parts.join(" ");
@@ -122,7 +122,8 @@ async function cmdRun() {
 
   try {
     const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, policy, headless: true, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, onEvent, onMessage: session.append });
-    if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim(), session: session.id }) + "\n"); return; }
+    const receipt = has("--verify") ? await verifyRun({ root: cfg.root, snap, proposerSpec: spec, maxTokens: cfg.maxTokens, json }) : null;
+    if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim(), session: session.id, receipt: receipt ? { id: receipt.id, verdict: receipt.verifier.verdict, cross_provider: receipt.cross_provider } : null }) + "\n"); return; }
     process.stdout.write("\n"); // streamed deltas already printed the answer
     const parts = [];
     if (counts.read) parts.push(`${counts.read} read`);
@@ -134,6 +135,24 @@ async function cmdRun() {
     if (json) { process.stdout.write(JSON.stringify({ ok: false, model: spec, error: e.message }) + "\n"); process.exitCode = 1; }
     else fail(e.message);
   }
+}
+
+// Opt-in cross-provider review of the change a `nomos run` just made: diff the
+// repo against the pre-run snapshot, have a DIFFERENT provider review it, write a
+// chained receipt, and render it honestly. Returns the receipt or null.
+async function verifyRun({ root, snap, proposerSpec, maxTokens, json }) {
+  const verifier = getFlag("--verifier", null);
+  if (!verifier) { if (!json) process.stderr.write(`\x1b[2m  --verify needs a second provider: add --verifier provider/model (a DIFFERENT provider than ${proposerSpec}).\x1b[0m\n`); return null; }
+  let diff = "";
+  try { diff = snap ? await getDiff({ root, against: snap.sha }) : await getDiff({ root }); } catch { /* not a git repo */ }
+  if (!diff.trim()) { if (!json) process.stderr.write(`\x1b[2m  nothing changed to cross-check.\x1b[0m\n`); return null; }
+  if (!json) process.stderr.write(`\n\x1b[2m  △ ${verifier} is reviewing ${proposerSpec}'s work…\x1b[0m\n`);
+  try {
+    const { receipt } = await runVerify({ diff, spec: verifier, source: proposerSpec, proposerProvider: proposerSpec.split("/")[0], maxTokens, prev: headHash(root), codeSnapshot: captureState(root) });
+    writeReceipt(root, receipt);
+    if (!json) process.stdout.write("\n" + renderReceipt(receipt) + "\n");
+    return receipt;
+  } catch (e) { if (!json) process.stderr.write(`\x1b[2m  cross-check skipped: ${e.message}\x1b[0m\n`); return null; }
 }
 
 async function cmdResume() {
@@ -399,9 +418,21 @@ function cmdAudit() {
   for (const f of files) { try { receipts.push(JSON.parse(readFileSync(path.join(dir, f), "utf8"))); } catch { /* skip non-receipt json */ } }
   const res = auditChain(receipts);
   if (has("--json")) {
-    process.stdout.write(JSON.stringify(res) + "\n");
+    process.stdout.write(JSON.stringify({ ok: res.ok, head: res.head, length: res.length, errors: res.errors }) + "\n");
   } else if (res.ok) {
-    process.stdout.write(`\x1b[32m✓ valid chain\x1b[0m — ${res.length} receipt${res.length === 1 ? "" : "s"}, head \x1b[1m${res.head}\x1b[0m \x1b[2m(pin this id)\x1b[0m\n`);
+    // The crypto fact (✓): the hashes match, nothing was inserted/deleted/reordered.
+    process.stdout.write(`\x1b[32m✓ chain intact\x1b[0m \x1b[2m(hashes match — no entry inserted, deleted, or reordered)\x1b[0m\n`);
+    process.stdout.write(`  ${res.length} cross-check${res.length === 1 ? "" : "s"}, head \x1b[1m${res.head}\x1b[0m \x1b[2m— pin this id\x1b[0m\n\n`);
+    // The forensic story (the moment-of-dispute value): who reviewed whom, the
+    // scoped verdict, what was checked, the code state. Honestly framed.
+    for (const r of res.chain) {
+      const word = r.verdict === "PASS" ? "agreed" : r.verdict === "FAIL" ? "\x1b[33mflagged\x1b[0m" : "concerns";
+      const indep = (r.proposer?.provider !== r.verifier?.provider) ? "" : " \x1b[31m(same provider — not independent)\x1b[0m";
+      const reason = String(r.verifier?.reasoning || "").replace(/\s+/g, " ").trim().slice(0, 90);
+      process.stdout.write(`  \x1b[2m△ ${r.id}\x1b[0m  ${r.verifier?.model || "?"} reviewed ${r.proposer?.model || "?"} · ${word}${indep}${r.code_snapshot ? ` \x1b[2m· code ${String(r.code_snapshot).slice(0, 8)}\x1b[0m` : ""}\n`);
+      if (reason) process.stdout.write(`        \x1b[2m${reason}\x1b[0m\n`);
+    }
+    process.stdout.write(`\n\x1b[2m  not a certification · re-checkable offline · trust terminates at the generator\x1b[0m\n`);
   } else {
     process.stdout.write(`\x1b[31m✗ BROKEN chain\x1b[0m \x1b[2m(${res.length} chain receipt${res.length === 1 ? "" : "s"})\x1b[0m:\n`);
     for (const e of res.errors) process.stdout.write(`  \x1b[31m·\x1b[0m ${e}\n`);
