@@ -28,6 +28,7 @@ import { listModels, CURATED } from "../src/models.js";
 import { runCouncil } from "../src/council.js";
 import { renderReceipt, writeReceipt, verifyReceiptHash, receiptIssues, auditChain, headHash } from "../src/receipt.js";
 import { buildPolicy, policyFromEnv } from "../src/permissions.js";
+import { takeSnapshot, undo, captureState } from "../src/snapshot.js";
 import { runSeat } from "../src/seat.js";
 import { getDiff, runVerify } from "../src/verify.js";
 
@@ -96,6 +97,10 @@ async function cmdRun() {
 
   // Header: which model, where (so the user knows the cwd + model before anything runs).
   if (!json) process.stderr.write(`\x1b[2m▸\x1b[0m \x1b[1m${spec}\x1b[0m \x1b[2m· ${cfg.root}${cfg.allowShell ? " · shell on" : ""}\x1b[0m\n`);
+  // Snapshot the repo so this run is reversible with `nomos undo`. No-op outside a
+  // git repo (captureState returns null); zero side effects on the working tree.
+  const snap = takeSnapshot(cfg.root, "run-" + Date.now());
+  if (snap && !json) process.stderr.write(`\x1b[2m  snapshot ${snap.sha.slice(0, 12)} · \`nomos undo\` to revert this run\x1b[0m\n`);
   const t0 = Date.now();
   const counts = { read: 0, edit: 0, write: 0, shell: 0, other: 0 };
   const onEvent = (e) => {
@@ -145,7 +150,7 @@ async function cmdVerify() {
   if (!diff.trim()) return fail(staged ? "No staged changes to verify (run `git add` first, or drop --staged)." : "No changes to verify. Edit something first, or pass --staged / --against <ref>.");
 
   if (!json) process.stderr.write(`\x1b[2m▸ reviewing ${diff.split("\n").length} diff lines with ${spec}…\x1b[0m\n`);
-  const { receipt, verdict, reasoning } = await runVerify({ diff, spec, source, maxTokens: cfg.maxTokens, prev: headHash(cfg.root) });
+  const { receipt, verdict, reasoning } = await runVerify({ diff, spec, source, maxTokens: cfg.maxTokens, prev: headHash(cfg.root), codeSnapshot: captureState(cfg.root) });
   const file = writeReceipt(cfg.root, receipt);
   if (json) {
     process.stdout.write(JSON.stringify(receipt) + "\n");
@@ -311,6 +316,20 @@ function cmdReceipt() {
   if (!ok) process.exitCode = 2;
 }
 
+function cmdUndo() {
+  // nomos undo — revert the last agent run's tracked changes to its snapshot. Saves
+  // a pre-undo safety snapshot first (nothing is lost); agent-created files are
+  // reported, not deleted.
+  const cfg = loadConfig({});
+  const res = undo(cfg.root);
+  if (!res.ok) return fail(res.error);
+  process.stdout.write(`\x1b[32m✓ reverted\x1b[0m tracked changes to snapshot \x1b[1m${res.restored}\x1b[0m${res.safety ? ` \x1b[2m(your pre-undo state saved as ${res.safety})\x1b[0m` : ""}\n`);
+  if (res.untracked.length) {
+    process.stdout.write(`\x1b[2m  ${res.untracked.length} file(s) the agent created were left in place — remove manually if unwanted:\x1b[0m\n`);
+    for (const f of res.untracked.slice(0, 30)) process.stdout.write(`    ${f}\n`);
+  }
+}
+
 function cmdAudit() {
   // nomos audit <dir> — verify a directory of receipts forms ONE valid append-only
   // chain (offline, no provider calls). Prints the head id to pin; exit 2 if the
@@ -459,6 +478,7 @@ else if (cmd === "council") await cmdCouncil();
 else if (cmd === "connect") await cmdConnect();
 else if (cmd === "receipt") cmdReceipt();
 else if (cmd === "audit") cmdAudit();
+else if (cmd === "undo") cmdUndo();
 else if (cmd === "mcp") await cmdMcp();
 else if (cmd === "auth") await cmdAuth();
 else if (cmd === "memory") cmdMemory();

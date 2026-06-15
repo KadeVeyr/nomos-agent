@@ -177,10 +177,20 @@ a malicious or compromised generator from forging any single receipt or rebuildi
 the entire chain from scratch with self-consistent hashes. **Trust in a chain is
 trust in its generator** (e.g. your own CI), reduced to trust in one head id.
 
+## Code snapshot (v1.2)
+
+v1.2 appends one more canonical field, `code_snapshot` (only for `v >= 1.2`): the
+git commit-ish of the **code state the verdict was rendered against** (the snapshot
+`nomos run` takes, or the working state `nomos verify` reviewed), or `null`. It is
+**in the hash** so a verdict can't be re-pointed at a different code state after the
+fact — the binding is part of what the receipt attests. Same honest scope as the
+rest: it records *which* state the generator says it evaluated; it does not prove
+the generator evaluated honestly.
+
 ## Stability
 
 The v1.0 pre-image (field set, order, hashing, id derivation, cross_provider rule)
-is **locked** and unchanged. v1.1 is a **compatible extension** — it only appends
-`prev_receipt_hash`, and only for `v >= 1.1`, so every v1.0 receipt keeps verifying
-against this document. A future *breaking* change would ship under a new
-`nomos_receipt` version.
+is **locked** and unchanged. v1.1 (`prev_receipt_hash`) and v1.2 (`code_snapshot`)
+are **compatible extensions** — each field is appended to the pre-image only for the
+versions that have it, so every v1.0 and v1.1 receipt keeps verifying against this
+document. A future *breaking* change would ship under a new `nomos_receipt` version.

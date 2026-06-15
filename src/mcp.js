@@ -14,6 +14,7 @@ import path from "node:path";
 import { getDiff, runVerify } from "./verify.js";
 import { runSeat } from "./seat.js";
 import { writeReceipt, headHash } from "./receipt.js";
+import { captureState } from "./snapshot.js";
 import { loadConfig } from "./config.js";
 
 const PROTOCOL_VERSION = "2025-06-18";
@@ -109,7 +110,7 @@ export async function handleMessage(msg, deps = {}) {
           if (!spec) return reply(toolText("No model. Pass `model` (provider/model) or set defaultModel in nomos.json.", true));
           const diff = await _getDiff({ root: cfg.root, staged: !!args.staged, against: args.against || null });
           if (!diff.trim()) return reply(toolText("No changes to verify (working tree clean — pass staged:true or against:<ref>).", true));
-          const { receipt, verdict, reasoning } = await _runVerify({ diff, spec, source: args.source || "your editor", maxTokens: args.max_tokens || cfg.maxTokens, prev: headHash(cfg.root) });
+          const { receipt, verdict, reasoning } = await _runVerify({ diff, spec, source: args.source || "your editor", maxTokens: args.max_tokens || cfg.maxTokens, prev: headHash(cfg.root), codeSnapshot: captureState(cfg.root) });
           const file = _writeReceipt(cfg.root, receipt);
           const text = `${verdict} — ${reasoning}\n\nreceipt ${receipt.id} (${file}) · cross_provider=${receipt.cross_provider}`;
           return reply(toolText(text, verdict === "FAIL"));

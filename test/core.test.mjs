@@ -129,24 +129,33 @@ test("verifyReceiptHash: a recomputed-hash forge of cross_provider is still caug
   assert.ok(!verifyReceiptHash(forged));
 });
 
-test("receipt v1.1: a fresh receipt is intact + complete + carries a chain link", () => {
-  assert.equal(RECEIPT_VERSION, "1.1");
-  const r = makeReceipt({ task: "t", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "looks right" }, ts: "2020" });
-  assert.equal(r.nomos_receipt, "1.1");
+test("receipt v1.2: a fresh receipt is intact + complete, carries a chain link AND a code_snapshot field", () => {
+  assert.equal(RECEIPT_VERSION, "1.2");
+  const r = makeReceipt({ task: "t", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "looks right" }, ts: "2020", codeSnapshot: "deadbeef" });
+  assert.equal(r.nomos_receipt, "1.2");
   assert.equal(r.prev_receipt_hash, null); // genesis
+  assert.equal(r.code_snapshot, "deadbeef");
   assert.ok(verifyReceiptHash(r));
   assert.deepEqual(receiptIssues(r), []);
+  // the code_snapshot is IN the hash — tampering it must be caught
+  assert.ok(!verifyReceiptHash({ ...r, code_snapshot: "feedface" }));
 });
 
-test("v1.0 receipts STILL verify (the lock holds) — canonicalization is version-aware", () => {
-  // hand-build a v1.0 receipt (no prev field) and sign it the v1.0 way
+test("v1.0 AND v1.1 receipts still verify (locks hold) — canonicalization is version-aware", () => {
+  // v1.0 (no prev, no code_snapshot)
   const v10 = { nomos_receipt: "1.0", task: "t", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "r" }, cross_provider: true };
-  const h = crypto.createHash("sha256").update(canonicalReceipt(v10)).digest("hex");
+  let h = crypto.createHash("sha256").update(canonicalReceipt(v10)).digest("hex");
   v10.hash = h; v10.id = h.slice(0, 12); v10.verdict = "PASS";
-  assert.ok(verifyReceiptHash(v10), "a 1.0 receipt must still verify after the 1.1 extension");
-  assert.deepEqual(receiptIssues(v10), []);
-  // and the 1.1 chain link must NOT leak into the 1.0 pre-image
+  assert.ok(verifyReceiptHash(v10), "a 1.0 receipt must still verify");
   assert.ok(!canonicalReceipt(v10).includes("prev_receipt_hash"));
+  assert.ok(!canonicalReceipt(v10).includes("code_snapshot"));
+  // v1.1 (prev, but no code_snapshot — that field must NOT leak into the 1.1 pre-image)
+  const v11 = { nomos_receipt: "1.1", task: "t", proposer: { model: "a/x", provider: "a", output: "o" }, verifier: { model: "b/y", provider: "b", verdict: "PASS", reasoning: "r" }, cross_provider: true, prev_receipt_hash: null };
+  h = crypto.createHash("sha256").update(canonicalReceipt(v11)).digest("hex");
+  v11.hash = h; v11.id = h.slice(0, 12); v11.verdict = "PASS";
+  assert.ok(verifyReceiptHash(v11), "a 1.1 receipt must still verify after the 1.2 extension");
+  assert.ok(canonicalReceipt(v11).includes("prev_receipt_hash"));
+  assert.ok(!canonicalReceipt(v11).includes("code_snapshot"));
 });
 
 function makeChain(n) {

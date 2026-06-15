@@ -25,11 +25,12 @@ import crypto from "node:crypto";
 // The canonical pre-image (canonicalReceipt), the sha256, the 12-hex id, and the
 // cross_provider re-derivation are a stable public contract (docs/RECEIPT_SPEC.md)
 // — a third party can re-implement the check and verify any receipt offline.
-// 1.1 adds ONE field, `prev_receipt_hash`, binding each receipt to the previous
-// one so a directory of receipts forms a tamper-evident append-only CHAIN under a
-// single pinnable head hash (see auditChain). 1.0 receipts (no prev field) still
-// verify as standalone — canonicalization is version-aware, so the lock holds.
-export const RECEIPT_VERSION = "1.1";
+// 1.1 adds `prev_receipt_hash` (the append-only CHAIN — see auditChain); 1.2 adds
+// `code_snapshot` (the git state the verdict was rendered against, so a verdict is
+// bound to its code). Canonicalization is VERSION-AWARE — each field is in the
+// pre-image only for versions that have it, so 1.0 and 1.1 receipts still verify
+// unchanged (the locks hold).
+export const RECEIPT_VERSION = "1.2";
 
 // The only verdicts a complete receipt may carry. A receipt whose verifier verdict
 // is anything else is treated as truncated/malformed (a cut-off verifier reply that
@@ -58,16 +59,16 @@ export function canonicalReceipt(r) {
     verifier_reasoning: r.verifier?.reasoning ?? null,
     cross_provider: r.cross_provider ?? null,
   };
-  // v1.1+ binds the chain link into the hash (so editing any past receipt changes
-  // its hash and breaks every descendant). v1.0 receipts hash EXACTLY as before —
-  // the field is appended only for >= 1.1, so the 1.0 lock is preserved.
+  // Version-aware extensions (appended in order so older versions hash unchanged):
+  // 1.1+ binds the chain link; 1.2+ binds the code snapshot the verdict was about.
   if (r.nomos_receipt !== "1.0") pre.prev_receipt_hash = r.prev_receipt_hash ?? null;
+  if (r.nomos_receipt !== "1.0" && r.nomos_receipt !== "1.1") pre.code_snapshot = r.code_snapshot ?? null;
   return JSON.stringify(pre);
 }
 
 // Build a receipt object from a finished proposer→verifier run. `ts` is supplied
 // by the caller (ISO string) so this stays pure/deterministic for the hash.
-export function makeReceipt({ task, proposer, verifier, ts, prev = null }) {
+export function makeReceipt({ task, proposer, verifier, ts, prev = null, codeSnapshot = null }) {
   const crossProvider = proposer.provider !== verifier.provider;
   const verdict = verifier.verdict || "UNKNOWN";
   // The hash binds every trust-bearing field — WHO proposed, WHO verified, with
@@ -82,6 +83,7 @@ export function makeReceipt({ task, proposer, verifier, ts, prev = null }) {
     verifier: { model: verifier.model, provider: verifier.provider, verdict, reasoning: verifier.reasoning },
     cross_provider: crossProvider,
     prev_receipt_hash: prev ?? null,
+    code_snapshot: codeSnapshot ?? null,
   };
   const hash = crypto.createHash("sha256").update(canonicalReceipt(signed)).digest("hex");
   return {
@@ -93,6 +95,7 @@ export function makeReceipt({ task, proposer, verifier, ts, prev = null }) {
     verifier: { model: verifier.model, provider: verifier.provider, verdict, reasoning: verifier.reasoning },
     cross_provider: crossProvider,
     prev_receipt_hash: prev ?? null,
+    code_snapshot: codeSnapshot ?? null,
     verdict,
     hash,
   };
