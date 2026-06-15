@@ -230,6 +230,31 @@ function cmdSessions() {
   for (const r of rows) process.stdout.write(`${r.done ? "\x1b[2m✓\x1b[0m" : "\x1b[33m…\x1b[0m"} \x1b[1m${r.id}\x1b[0m \x1b[2m${r.turns} turns\x1b[0m  ${r.task}\n`);
 }
 
+function cmdStatus() {
+  // nomos status — a "where am I" snapshot: providers, verify mode, the receipt
+  // chain head (the moat at a glance), and resumable sessions.
+  const cfg = loadConfig({});
+  const connected = listAuth().filter((a) => a.configured).map((a) => a.id);
+  process.stdout.write(`\x1b[1mnomos\x1b[0m \x1b[2m· ${cfg.root}\x1b[0m\n`);
+  process.stdout.write(`  model      ${cfg.defaultModel ? `\x1b[1m${cfg.defaultModel}\x1b[0m` : "\x1b[2m(none — pass -m provider/model)\x1b[0m"}\n`);
+  process.stdout.write(`  providers  ${connected.length ? connected.join(", ") : "\x1b[2mnone — run `nomos connect`\x1b[0m"} \x1b[2m(${connected.length})\x1b[0m\n`);
+  const vmode = cfg.verify || "off";
+  process.stdout.write(`  verify     ${vmode === "off" ? "\x1b[2moff\x1b[0m \x1b[2m(use --verify, or set NOMOS_VERIFY=risky)\x1b[0m" : `\x1b[1m${vmode}\x1b[0m${cfg.verifier ? ` \x1b[2m· verifier ${cfg.verifier}\x1b[0m` : " \x1b[33m· set NOMOS_VERIFIER\x1b[0m"}`}\n`);
+  let rline = "\x1b[2mnone yet — nomos run --verify, or nomos verify\x1b[0m";
+  try {
+    const dir = path.join(cfg.root, ".nomos", "receipts");
+    const receipts = readdirSync(dir).filter((f) => f.endsWith(".json")).map((f) => { try { return JSON.parse(readFileSync(path.join(dir, f), "utf8")); } catch { return null; } }).filter(Boolean);
+    if (receipts.length) {
+      const res = auditChain(receipts);
+      rline = res.length === 0 ? `\x1b[2m${receipts.length} receipt${receipts.length === 1 ? "" : "s"} on disk (not a chain yet)\x1b[0m`
+        : res.ok ? `△ ${res.length} cross-check${res.length === 1 ? "" : "s"}, head \x1b[1m${res.head}\x1b[0m \x1b[2m(chain intact)\x1b[0m`
+        : `\x1b[31m△ ${res.length} — chain BROKEN (run nomos audit)\x1b[0m`;
+    }
+  } catch { /* none */ }
+  process.stdout.write(`  receipts   ${rline}\n`);
+  try { const ss = listSessions(); const open = ss.filter((s) => !s.done).length; if (ss.length) process.stdout.write(`  sessions   ${ss.length} logged${open ? ` · \x1b[33m${open} resumable\x1b[0m \x1b[2m(nomos resume)\x1b[0m` : ""}\n`); } catch { /* none */ }
+}
+
 async function cmdVerify() {
   // nomos verify [--staged] [--against <ref>] [-m verifier] — an independent
   // second opinion on a change another tool (Claude Code / Cursor / you) made.
@@ -558,6 +583,7 @@ CODE
       ... --verify --verifier provider/model   have a DIFFERENT provider review the change → receipt
   nomos undo                         revert the last run's tracked changes to its snapshot
   nomos resume <id> | nomos sessions  continue an interrupted run / list resumable sessions
+  nomos status                       where am I: providers, verify mode, receipt-chain head, sessions
 
 PROVE  (the second seat)
   nomos verify [-m model] [--staged] [--against <ref>]   independent review of a change → receipt
@@ -595,6 +621,7 @@ else if (cmd === "audit") cmdAudit();
 else if (cmd === "undo") cmdUndo();
 else if (cmd === "resume") await cmdResume();
 else if (cmd === "sessions") cmdSessions();
+else if (cmd === "status") cmdStatus();
 else if (cmd === "mcp") await cmdMcp();
 else if (cmd === "auth") await cmdAuth();
 else if (cmd === "memory") cmdMemory();
