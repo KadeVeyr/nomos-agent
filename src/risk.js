@@ -44,7 +44,9 @@ export function parseNumstat(text) {
 
 // Classify a set of changed files (parsed numstat). Returns { risky, reason }.
 export function classifyChange(rows) {
-  const files = Array.isArray(rows) ? rows : [];
+  // NOMOS's own bookkeeping (.nomos/sessions, snapshots, receipts) is never part of
+  // the user's change — and ".nomos/sessions" must not match the "session" rule.
+  const files = (Array.isArray(rows) ? rows : []).filter((f) => !/(^|\/)\.nomos\//.test(String(f.path)));
   if (!files.length) return { risky: false, reason: null };
   // A sensitive PATH makes any change risky (matched on the normalized path).
   for (const f of files) {

@@ -30,6 +30,17 @@ test("classifyChange: camelCase / plural / .env / script / generic-access names 
   for (const p of ["src/cors.js", "src/firewall.js", "src/admin.js", "src/guard.js", "src/access.js"]) assert.equal(risky(p), true, `access: ${p}`);
 });
 
+test("classifyChange ignores NOMOS's own .nomos/ bookkeeping (no false 'session' positive)", () => {
+  // a trivial user edit + the agent's own .nomos session/snapshot files → still LOW-risk
+  // (".nomos/sessions/…" must NOT match the "session" rule)
+  const rows = [
+    { added: 1, removed: 1, path: "src/greeting.mjs" },
+    { added: 5, removed: 0, path: ".nomos/sessions/20260615T0334.jsonl" },
+    { added: 2, removed: 0, path: ".nomos/snapshots/latest.json" },
+  ];
+  assert.equal(classifyChange(rows).risky, false);
+});
+
 test("classifyChange: a big DELETION from a code file is ship-risk (deleted checks/guards)", () => {
   assert.match(classifyChange([{ added: 0, removed: 30, path: "src/server.mjs" }]).reason, /removed/);
   assert.equal(classifyChange([{ added: 0, removed: 3, path: "src/server.mjs" }]).risky, false); // a tiny removal isn't

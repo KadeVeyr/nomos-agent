@@ -56,10 +56,11 @@ export function diffSince(root, baseSha, { numstat = false } = {}) {
   const idx = path.join(os.tmpdir(), `nomos-idx-${process.pid}-${Date.now()}`);
   const env = { ...gitEnv(), GIT_INDEX_FILE: idx };
   const run = (args) => execFileSync("git", args, { cwd: root, env, windowsHide: true, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  const ex = ":(exclude).nomos"; // NOMOS's own bookkeeping (.nomos/) is never part of the user's change
   try {
-    run(["read-tree", baseSha]);   // throwaway index = the base tree
-    run(["add", "-A", "."]);       // stage the current working tree (incl NEW files), .gitignore honored
-    return run(numstat ? ["diff", "--cached", "--numstat", baseSha] : ["diff", "--cached", baseSha]);
+    run(["read-tree", baseSha]);                 // throwaway index = the base tree
+    run(["add", "-A", "--", ".", ex]);           // stage the current working tree (incl NEW files), minus .nomos
+    return run(numstat ? ["diff", "--cached", "--numstat", baseSha, "--", ".", ex] : ["diff", "--cached", baseSha, "--", ".", ex]);
   } catch { return null; }
   finally { try { fs.unlinkSync(idx); } catch { /* best effort */ } }
 }
