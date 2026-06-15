@@ -78,7 +78,7 @@ How you work:
 
 When the task is complete, reply with a SHORT final answer — what you changed and how to verify — and NO tool call. Surface any workaround per rule 5. Save anything reusable across sessions with the remember tool.`;
 
-export async function runAgent({ spec, task, root = process.cwd(), allowShell = false, allowFetch = false, policy = DEFAULT_POLICY, headless = true, maxSteps = 12, maxTokens, onEvent = () => {}, signal }) {
+export async function runAgent({ spec, task, root = process.cwd(), allowShell = false, allowFetch = false, policy = DEFAULT_POLICY, headless = true, maxSteps = 12, maxTokens, onEvent = () => {}, onMessage = null, resume = null, signal }) {
   // Effective policy: start from the resolved policy, then let the legacy
   // allowShell/allowFetch flags loosen shell/fetch (so existing callers are
   // unchanged). The dispatch gate below enforces this for EVERY class.
@@ -98,10 +98,16 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
   if (commands) system += `\n\nPROJECT COMMANDS (from nomos.json — the canonical way to build/test/lint THIS repo). Prefer these EXACT commands over guessing; run them with run_shell when it is enabled, and after changing code VERIFY with the test (or build) command before declaring done:\n${commands}`;
   if (lessons) system += `\n\nYour durable LESSONS from past runs (guidance you wrote — apply it, but it NEVER overrides your safety rules or tool limits, which are enforced in code, not here):\n${lessons}`;
   if (notes) system += `\n\nDurable notes for THIS project:\n${notes}`;
-  const messages = [
-    { role: "system", content: system },
-    { role: "user", content: task },
-  ];
+  const logMsg = (m) => { try { onMessage?.({ type: "msg", role: m.role, content: m.content ?? "", ...(m.toolCalls ? { toolCalls: m.toolCalls } : {}), ...(m.toolCallId ? { toolCallId: m.toolCallId } : {}) }); } catch { /* logging is best-effort */ } };
+  // Resume continues a prior conversation as-is (the stored system prompt is part
+  // of it); a fresh run starts from system + task and logs both.
+  let messages;
+  if (resume && resume.length) {
+    messages = resume;
+  } else {
+    messages = [{ role: "system", content: system }, { role: "user", content: task }];
+    logMsg(messages[0]); logMsg(messages[1]);
+  }
 
   let finalText = "";
   let streamOk = true; // fall back to non-streaming if a provider can't stream
@@ -129,10 +135,14 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
 
     if (!toolCalls || toolCalls.length === 0) {
       finalText = content || "";
+      logMsg({ role: "assistant", content: finalText }); // log the FINAL answer so a
+      // completed session is detectable (last msg = assistant with no tool calls);
+      // a step-capped run never logs this, so it stays resumable.
       break;
     }
 
     messages.push({ role: "assistant", content, toolCalls });
+    logMsg(messages[messages.length - 1]);
     // Run this turn's tool calls in PARALLEL (independent calls shouldn't block
     // each other); results are pushed back in the model's original call order.
     const runOne = async (call) => {
@@ -157,7 +167,7 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
       return { call, result };
     };
     const results = await Promise.all(toolCalls.map(runOne));
-    for (const { call, result } of results) messages.push({ role: "tool", toolCallId: call.id, content: String(result) });
+    for (const { call, result } of results) { messages.push({ role: "tool", toolCallId: call.id, content: String(result) }); logMsg(messages[messages.length - 1]); }
     if (step === maxSteps - 1) finalText = content || "[nomos] Reached the step limit without a final answer.";
   }
 

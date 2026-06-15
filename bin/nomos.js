@@ -29,6 +29,7 @@ import { runCouncil } from "../src/council.js";
 import { renderReceipt, writeReceipt, verifyReceiptHash, receiptIssues, auditChain, headHash } from "../src/receipt.js";
 import { buildPolicy, policyFromEnv } from "../src/permissions.js";
 import { takeSnapshot, undo, captureState } from "../src/snapshot.js";
+import { startSession, loadSession, listSessions, appenderFor } from "../src/session.js";
 import { runSeat } from "../src/seat.js";
 import { getDiff, runVerify } from "../src/verify.js";
 
@@ -101,6 +102,9 @@ async function cmdRun() {
   // git repo (captureState returns null); zero side effects on the working tree.
   const snap = takeSnapshot(cfg.root, "run-" + Date.now());
   if (snap && !json) process.stderr.write(`\x1b[2m  snapshot ${snap.sha.slice(0, 12)} · \`nomos undo\` to revert this run\x1b[0m\n`);
+  // Log this run as a resumable session (append-only JSONL).
+  const session = startSession({ root: cfg.root, spec, task });
+  if (!json) process.stderr.write(`\x1b[2m  session ${session.id} · \`nomos resume ${session.id}\` if interrupted\x1b[0m\n`);
   const t0 = Date.now();
   const counts = { read: 0, edit: 0, write: 0, shell: 0, other: 0 };
   const onEvent = (e) => {
@@ -117,8 +121,8 @@ async function cmdRun() {
   };
 
   try {
-    const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, policy, headless: true, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, onEvent });
-    if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim() }) + "\n"); return; }
+    const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, policy, headless: true, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, onEvent, onMessage: session.append });
+    if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim(), session: session.id }) + "\n"); return; }
     process.stdout.write("\n"); // streamed deltas already printed the answer
     const parts = [];
     if (counts.read) parts.push(`${counts.read} read`);
@@ -130,6 +134,57 @@ async function cmdRun() {
     if (json) { process.stdout.write(JSON.stringify({ ok: false, model: spec, error: e.message }) + "\n"); process.exitCode = 1; }
     else fail(e.message);
   }
+}
+
+async function cmdResume() {
+  // nomos resume <id> — continue an interrupted run from its session log. Model,
+  // task, root, and system prompt come from the stored session; capability flags
+  // come from THIS invocation (so you can grant/restrict on resume).
+  const id = argv[1];
+  if (!id || id.startsWith("-")) return fail("Usage: nomos resume <session-id>   (run `nomos sessions` to list)");
+  const s = loadSession(id);
+  if (!s) return fail(`No session "${id}" found. Run \`nomos sessions\` to list.`);
+  if (!s.spec) return fail(`Session ${s.id} has no model recorded — cannot resume.`);
+  const json = has("--json");
+  if (s.done) {
+    if (json) process.stdout.write(JSON.stringify({ ok: true, done: true, session: s.id }) + "\n");
+    else process.stdout.write(`\x1b[2mSession ${s.id} already finished (${s.messages.length} turns) — nothing to resume.\x1b[0m\n`);
+    return;
+  }
+  const cfg = loadConfig({ root: s.root, cli: { allowShell: has("--allow-shell") ? true : undefined, allowFetch: has("--allow-fetch") ? true : undefined, maxTokens: getInt("--max-tokens") } });
+  const cliPolicy = {};
+  for (let i = 0; i < argv.length; i++) if ((argv[i] === "--allow" || argv[i] === "--deny") && argv[i + 1]) cliPolicy[argv[i + 1].toLowerCase()] = argv[i] === "--allow" ? "allow" : "deny";
+  if (has("--allow-shell")) cliPolicy.shell = "allow";
+  if (has("--allow-fetch")) cliPolicy.fetch = "allow";
+  let projectPerms = {};
+  try { projectPerms = JSON.parse(readFileSync(path.join(s.root, "nomos.json"), "utf8")).permissions || {}; } catch { /* none */ }
+  const policy = buildPolicy({ env: policyFromEnv(), cli: cliPolicy, project: projectPerms });
+  if (!json) process.stderr.write(`\x1b[2m▸ resume\x1b[0m \x1b[1m${s.spec}\x1b[0m \x1b[2m· ${s.id} · ${s.messages.length} turns · ${s.root}\x1b[0m\n`);
+  const snap = takeSnapshot(s.root, "resume-" + Date.now());
+  if (snap && !json) process.stderr.write(`\x1b[2m  snapshot ${snap.sha.slice(0, 12)} · \`nomos undo\` to revert\x1b[0m\n`);
+  const onEvent = (e) => {
+    if (e.type === "delta") { if (!json) process.stdout.write(e.text); }
+    else if (e.type === "tool_call") process.stderr.write(`\n\x1b[2m·\x1b[0m \x1b[36m${e.name}\x1b[0m \x1b[2m${String(e.args?.path || e.args?.command || e.args?.pattern || e.args?.query || "").slice(0, 70)}\x1b[0m\n`);
+    else if (e.type === "tool_result") process.stderr.write(`\x1b[2m  → ${String(e.result).replace(/\n/g, " ⏎ ").slice(0, 120)}\x1b[0m\n`);
+    else if (e.type === "error") process.stderr.write(`\x1b[31m· error: ${e.message}\x1b[0m\n`);
+  };
+  const append = appenderFor(s.file);
+  try {
+    const result = await runAgent({ spec: s.spec, task: s.task, root: s.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, policy, headless: true, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, resume: s.messages, onEvent, onMessage: append });
+    if (json) { process.stdout.write(JSON.stringify({ ok: true, model: s.spec, result: (result || "").trim(), session: s.id }) + "\n"); return; }
+    process.stdout.write("\n");
+    process.stderr.write(`\x1b[2m──\x1b[0m \x1b[32m✓ resumed + done\x1b[0m\n`);
+  } catch (e) {
+    if (json) { process.stdout.write(JSON.stringify({ ok: false, error: e.message }) + "\n"); process.exitCode = 1; }
+    else fail(e.message);
+  }
+}
+
+function cmdSessions() {
+  // nomos sessions — list recent resumable sessions (newest first).
+  const rows = listSessions();
+  if (!rows.length) { process.stdout.write("No sessions yet.\n"); return; }
+  for (const r of rows) process.stdout.write(`${r.done ? "\x1b[2m✓\x1b[0m" : "\x1b[33m…\x1b[0m"} \x1b[1m${r.id}\x1b[0m \x1b[2m${r.turns} turns\x1b[0m  ${r.task}\n`);
 }
 
 async function cmdVerify() {
@@ -479,6 +534,8 @@ else if (cmd === "connect") await cmdConnect();
 else if (cmd === "receipt") cmdReceipt();
 else if (cmd === "audit") cmdAudit();
 else if (cmd === "undo") cmdUndo();
+else if (cmd === "resume") await cmdResume();
+else if (cmd === "sessions") cmdSessions();
 else if (cmd === "mcp") await cmdMcp();
 else if (cmd === "auth") await cmdAuth();
 else if (cmd === "memory") cmdMemory();
