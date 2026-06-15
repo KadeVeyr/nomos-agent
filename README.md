@@ -60,7 +60,14 @@ nomos audit .nomos/receipts
 
 Hand a receipt to anyone; they re-check it offline with no provider call (`nomos receipt verify <file>`, exit 2 if altered). Insert, delete, or reorder a receipt in the chain and `nomos audit` catches it. The full contract — the canonical hash, the chain, the honest scope — is in [docs/RECEIPT_SPEC.md](docs/RECEIPT_SPEC.md); anyone can re-implement the check.
 
-> Verification is **opt-in** — `nomos run` is fast and quiet by default. Add `--verify` (and a `--verifier` from a *different* provider) when a change is worth a second pair of eyes. The receipt is the trophy; the live review is optional ceremony.
+> Verification is **opt-in** — `nomos run` is fast and quiet by default. Add `--verify` (and a `--verifier` from a *different* provider) when a change is worth a second pair of eyes; the review streams live, and the receipt is the trophy. Or set a default mode so it happens for you:
+>
+> ```sh
+> export NOMOS_VERIFIER=openai/gpt-5.5
+> export NOMOS_VERIFY=risky      # off (default) | risky | always
+> ```
+>
+> **`risky`** auto-cross-checks only ship-risk changes — a targeted, deterministic read of the diff: a sensitive path (auth, secrets/crypto, payment, migration, CI/deploy, dependency manifests, `.env*`, shell scripts), a big deletion, more than one code file, or a large change. A trivial single edit or a docs change is left alone. The receipt says *why* it was checked (`auto: touched auth / session`). **`always`** checks everything; **`off`** is the default. (`verifier` is an egress choice — a cloned repo's `nomos.json` can't set it.)
 
 ## Reversible & resumable
 

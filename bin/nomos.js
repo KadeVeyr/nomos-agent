@@ -547,31 +547,35 @@ async function cmdModels() {
 function fail(msg) { process.stderr.write(`nomos: ${msg}\n`); process.exitCode = 1; }
 
 function help() {
-  console.log(`nomos — the headless coding agent you call from your editor. Bring your own subs.
+  console.log(`nomos — a coding agent that proves its work. Bring your own model.
 
 First time?   nomos connect        (pick a provider, paste ONE key)
-              nomos verify -m anthropic/claude-opus-4-8   (review what your editor just changed)
+              nomos run -m provider/model "fix the failing test" --allow-shell
 
-  nomos verify [-m provider/model] [--staged] [--against <ref>] [--max-tokens N]
-                                     independent second opinion on a change → receipt (one key)
-  nomos run -m provider/model "task" [--json] [--allow-shell] [--max-tokens N]
-  nomos seat -f directive.md -m provider/model [--timeout-ms N] [--max-tokens N] [--min-output-bytes N] [--json]
-                                     fire a directive at a provider → structured transcript (a council seat)
-  nomos council -m provider/model "task" [--verifier provider/model] [--max-tokens N]
-                                     run it, then a DIFFERENT provider verifies → receipt
-  nomos receipt verify <file>        re-check a receipt's content hash (tamper-evident; exit 2 if broken)
-  nomos mcp                          run as an MCP server (stdio) so your editor calls nomos as a tool
-  nomos connect                      connect a provider — paid plan OR API key (interactive)
-  nomos auth login <provider>        quick path: store an API key (local, server-side)
-  nomos auth list                    show connected providers + method
-  nomos auth logout <provider>       remove a stored credential
-  nomos models [provider]            list models (live from your key) to pick from
-  nomos providers                    list supported providers + auth methods
-  nomos memory [clear]               show / clear this project's durable notes
+CODE
+  nomos run -m provider/model "task" [--allow-shell] [--allow/--deny <class>] [--json]
+                                     explore → edit → verify; reversible (snapshot + nomos undo)
+      ... --verify --verifier provider/model   have a DIFFERENT provider review the change → receipt
+  nomos undo                         revert the last run's tracked changes to its snapshot
+  nomos resume <id> | nomos sessions  continue an interrupted run / list resumable sessions
+
+PROVE  (the second seat)
+  nomos verify [-m model] [--staged] [--against <ref>]   independent review of a change → receipt
+  nomos council -m model "task" [--verifier model]       run it, a DIFFERENT provider reviews → receipt
+  nomos receipt verify <file>        re-check one receipt offline (tamper-evident; exit 2 if broken)
+  nomos audit <dir>                  walk a receipt chain — who reviewed what, the forensic trail
+
+SETUP
+  nomos connect | nomos auth list|login|logout <provider> | nomos providers | nomos models [provider]
+  nomos seat -f directive.md -m model [--json]   one-shot directive → structured transcript
+  nomos mcp                          run as an MCP server (stdio) for Claude Code / Cursor / Codex
+  nomos memory [clear] | nomos lessons [clear]   durable per-project notes / cross-run lessons
   nomos                              launch the TUI
 
-Config: nomos.json (project) or ~/.config/nomos/config.json. Keys: defaultModel, allowShell, maxSteps, maxTokens.
-Flags override config; env: NOMOS_MODEL / NOMOS_ALLOW_SHELL / NOMOS_MAX_STEPS / NOMOS_MAX_TOKENS.`);
+Config: nomos.json (project) or ~/.config/nomos/config.json. Keys: defaultModel, allowShell, maxSteps,
+maxTokens, verify (off|risky|always), verifier (provider/model). A repo's nomos.json can't grant
+capabilities, pick the model, or choose the verifier. Env: NOMOS_MODEL / NOMOS_ALLOW_SHELL /
+NOMOS_MAX_STEPS / NOMOS_MAX_TOKENS / NOMOS_VERIFY / NOMOS_VERIFIER.`);
 }
 
 function version() {
