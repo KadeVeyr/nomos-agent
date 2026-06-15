@@ -229,9 +229,9 @@ async function cmdVerify() {
   if (json) {
     process.stdout.write(JSON.stringify(receipt) + "\n");
   } else {
-    const mark = verdict === "PASS" ? "\x1b[32m✓ PASS\x1b[0m" : verdict === "FAIL" ? "\x1b[31m✗ FAIL\x1b[0m" : "\x1b[33m‼ CONCERNS\x1b[0m";
-    process.stdout.write(`\n${mark} — ${reasoning}\n`);
-    process.stdout.write(`\x1b[2m── receipt ${receipt.id} · independently checked by ${spec}\x1b[0m\n`);
+    // Render honestly (same renderer as run --verify / council): describe the
+    // EVENT, no green ✓ on a verdict — the honesty doctrine holds in every command.
+    process.stdout.write("\n" + renderReceipt(receipt) + "\n");
   }
   process.stderr.write(`receipt: ${file}\n`);
   if (verdict === "FAIL") process.exitCode = 2;

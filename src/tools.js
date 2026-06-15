@@ -479,13 +479,20 @@ export function makeTools({ root = process.cwd(), allowShell = false, allowFetch
           // inline but works from a script). Writing the exact command to a script
           // preserves its quoting on both platforms.
           const win = process.platform === "win32";
-          const file = path.join(os.tmpdir(), `nomos-sh-${process.pid}-${Date.now()}${win ? ".cmd" : ".sh"}`);
-          try { fs.writeFileSync(file, win ? `@echo off\r\n${command}\r\n` : `${command}\n`); }
-          catch (e) { return resolve(`Command failed: could not stage the command (${e.message})`); }
+          // Stage the script in a PRIVATE temp dir (mkdtemp = mode 0700), with the
+          // file written 0600 and the exclusive "wx" flag — so a predictable name +
+          // a pre-planted symlink in the shared temp dir can't redirect the write or
+          // expose the command text to other local users.
+          let dir, file;
+          try {
+            dir = fs.mkdtempSync(path.join(os.tmpdir(), "nomos-sh-"));
+            file = path.join(dir, win ? "cmd.cmd" : "cmd.sh");
+            fs.writeFileSync(file, win ? `@echo off\r\n${command}\r\n` : `${command}\n`, { mode: 0o600, flag: "wx" });
+          } catch (e) { return resolve(`Command failed: could not stage the command (${e.message})`); }
           const shell = win ? (process.env.ComSpec || "cmd.exe") : "/bin/sh";
           const args = win ? ["/d", "/c", file] : [file];
           execFile(shell, args, { cwd: root, timeout: 20000, maxBuffer: 1024 * 1024, windowsHide: true }, (err, stdout, stderr) => {
-            try { fs.unlinkSync(file); } catch { /* best effort */ }
+            try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best effort */ }
             const out = `${stdout || ""}${stderr ? "\n[stderr]\n" + stderr : ""}`.slice(0, 20000);
             resolve(err && !out ? `Command failed: ${err.code || err.message}` : out || "(no output)");
           });
