@@ -10,7 +10,7 @@ import { parseModels } from "../src/models.js";
 import { extractFinalSentinel, runSeat, packContext } from "../src/seat.js";
 import { parseVerdict } from "../src/council.js";
 import { makeReceipt, verifyReceiptHash, canonicalReceipt, receiptIssues, auditChain, RECEIPT_VERSION } from "../src/receipt.js";
-import { trimContext, readProjectCommands } from "../src/agent.js";
+import { trimContext, readProjectCommands, classifyResult, turnFingerprint } from "../src/agent.js";
 
 test("resolveRoute: kimi-for-coding = anthropic + x-api-key + version, no bearer", () => {
   const r = resolveRoute(PROVIDERS["kimi-for-coding"], { value: "sk-k123456789", method: "apikey" });
@@ -283,6 +283,25 @@ test("packContext: sorted + byte cap + audit", () => {
   assert.equal(audit.find((x) => x.path === "a.txt").included, true);
   assert.equal(audit.find((x) => x.path === "b.txt").included, false);
   fs.rmSync(d, { recursive: true, force: true });
+});
+
+test("anti-loop: classifyResult collapses empty/error outcomes; turnFingerprint detects repetition", () => {
+  assert.equal(classifyResult("(no output)"), "∅empty");
+  assert.equal(classifyResult("   "), "∅empty");
+  assert.match(classifyResult("Tool error: boom"), /^⚠error/);
+  assert.match(classifyResult("Permission denied: write"), /^⚠error/);
+  assert.equal(classifyResult("hello world"), "hello world");
+  // identical tool calls + same outcome class → identical fingerprint (= stuck signal)
+  const a = [{ call: { name: "run_shell", args: { command: "node x" } }, result: "(no output)" }];
+  const b = [{ call: { name: "run_shell", args: { command: "node x" } }, result: "" }]; // also empty
+  assert.equal(turnFingerprint(a), turnFingerprint(b));
+  // different args → different fingerprint (not stuck)
+  const c = [{ call: { name: "run_shell", args: { command: "node y" } }, result: "(no output)" }];
+  assert.notEqual(turnFingerprint(a), turnFingerprint(c));
+  // order-independent (parallel tool calls in a turn)
+  const m1 = [{ call: { name: "read_file", args: { path: "a" } }, result: "A" }, { call: { name: "read_file", args: { path: "b" } }, result: "B" }];
+  const m2 = [{ call: { name: "read_file", args: { path: "b" } }, result: "B" }, { call: { name: "read_file", args: { path: "a" } }, result: "A" }];
+  assert.equal(turnFingerprint(m1), turnFingerprint(m2));
 });
 
 test("trimContext truncates old tool messages over budget", () => {

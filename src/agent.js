@@ -29,6 +29,23 @@ export function trimContext(messages, maxChars = 150000) {
   }
 }
 
+// Anti-loop: classify a tool result so two turns that do the same thing and get
+// the "same" outcome compare equal — even when the raw text differs trivially.
+// Empty/error outcomes collapse to a class; otherwise a bounded prefix.
+export function classifyResult(r) {
+  const s = String(r == null ? "" : r);
+  if (!s.trim() || s === "(no output)") return "∅empty";
+  if (/^(Tool error|Permission denied|Unknown tool|Missing required|git .*failed|Command failed)/.test(s) || /\bfailed:/.test(s)) return "⚠error:" + s.slice(0, 40);
+  return s.slice(0, 120);
+}
+// A fingerprint of one turn's tool calls + their outcome classes. Identical
+// fingerprints on consecutive turns mean the agent is repeating itself.
+export function turnFingerprint(results) {
+  return results.map(({ call, result }) => `${call.name}(${JSON.stringify(call.args)})→${classifyResult(result)}`).sort().join("|");
+}
+const STUCK_NUDGE = 2; // after this many IDENTICAL repeats, nudge the agent to change approach
+const STUCK_STOP = 4;  // after this many, end the run early with an honest "stuck" report (don't thrash the step cap)
+
 // Project conventions file (like Claude Code's CLAUDE.md / OpenCode's AGENTS.md).
 function readProjectGuide(root) {
   for (const name of ["AGENTS.md", "NOMOS.md", "CLAUDE.md"]) {
@@ -111,6 +128,7 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
 
   let finalText = "";
   let streamOk = true; // fall back to non-streaming if a provider can't stream
+  let lastFp = null, stuck = 0; // anti-loop: consecutive identical tool-turn fingerprints
   for (let step = 0; step < maxSteps; step++) {
     trimContext(messages); // bound context growth on long runs
     let res;
@@ -168,6 +186,20 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
     };
     const results = await Promise.all(toolCalls.map(runOne));
     for (const { call, result } of results) { messages.push({ role: "tool", toolCallId: call.id, content: String(result) }); logMsg(messages[messages.length - 1]); }
+    // Anti-loop: if the agent repeats the same tool call(s) AND gets the same
+    // outcome turn after turn, it's stuck — nudge it once, then end early with an
+    // honest report rather than thrashing to the step cap.
+    const fp = turnFingerprint(results);
+    if (fp && fp === lastFp) stuck++; else { stuck = 0; lastFp = fp; }
+    if (stuck === STUCK_NUDGE) {
+      messages.push({ role: "user", content: `[nomos] You have repeated the same action ${STUCK_NUDGE + 1} times and gotten the same result each time — this is NOT making progress. Stop repeating it: either try a fundamentally different approach, or if you cannot proceed, state plainly what is blocking you and give your FINAL answer now (no tool call).` });
+      logMsg(messages[messages.length - 1]);
+    } else if (stuck >= STUCK_STOP) {
+      finalText = (content ? content + "\n\n" : "") + `[nomos] Stopped early — repeated the same action(s) ${stuck + 1}× with no progress (stuck on: ${[...new Set(results.map((r) => r.call.name))].join(", ")}). Ending rather than exhausting the step budget; the work above may be incomplete.`;
+      logMsg({ role: "assistant", content: finalText });
+      onEvent({ type: "error", message: "stuck — stopped early to avoid thrashing the step budget" });
+      break;
+    }
     if (step === maxSteps - 1) finalText = content || "[nomos] Reached the step limit without a final answer.";
   }
 
