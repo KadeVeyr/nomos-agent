@@ -122,6 +122,8 @@ export function headHash(root) {
 export function writeReceipt(root, receipt) {
   const dir = receiptDir(root);
   fs.mkdirSync(dir, { recursive: true });
+  // keep .nomos/ out of the user's git (self-contained ignore-all)
+  try { const gi = path.join(root, ".nomos", ".gitignore"); if (!fs.existsSync(gi)) fs.writeFileSync(gi, "*\n"); } catch { /* best effort */ }
   const file = path.join(dir, `${receipt.id}.json`);
   fs.writeFileSync(file, JSON.stringify(receipt, null, 2));
   return file;

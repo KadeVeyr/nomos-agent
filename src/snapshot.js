@@ -17,6 +17,19 @@ import { execFileSync } from "node:child_process";
 
 const snapDir = (root) => path.join(root, ".nomos", "snapshots");
 
+// Keep NOMOS's own .nomos/ bookkeeping (snapshots, receipts, notes) out of the
+// user's git entirely — a self-contained .nomos/.gitignore that ignores everything
+// under it (incl. itself). So `git status` stays clean, the user can't accidentally
+// commit NOMOS state, and verifiers never see it. Best-effort, idempotent.
+export function ensureNomosIgnored(root) {
+  try {
+    const dir = path.join(root, ".nomos");
+    fs.mkdirSync(dir, { recursive: true });
+    const gi = path.join(dir, ".gitignore");
+    if (!fs.existsSync(gi)) fs.writeFileSync(gi, "*\n");
+  } catch { /* best effort */ }
+}
+
 function gitEnv() {
   const e = {};
   for (const [k, v] of Object.entries(process.env)) if (!/^GIT_/.test(k)) e[k] = v;
@@ -69,6 +82,7 @@ export function diffSince(root, baseSha, { numstat = false } = {}) {
 export function takeSnapshot(root, runId = "run") {
   const sha = captureState(root);
   if (!sha) return null;
+  ensureNomosIgnored(root); // keep .nomos/ out of the user's git
   // record the user's pre-run untracked files NOW (before we create .nomos state)
   // so undo can tell them apart from files the agent creates during the run.
   const untracked = (tryGit(root, ["ls-files", "--others", "--exclude-standard"]) || "").split("\n").filter(Boolean);
