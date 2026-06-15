@@ -12,6 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import { execFileSync } from "node:child_process";
 
 const snapDir = (root) => path.join(root, ".nomos", "snapshots");
@@ -41,6 +42,26 @@ export function captureState(root) {
   if (!sha) sha = tryGit(root, ["stash", "create"]);                   // older git w/o -u
   if (!sha) sha = headSha(root);                                       // clean tree
   return sha || null;
+}
+
+// Full diff of everything that changed since baseSha — INCLUDING new untracked
+// files. A plain `git diff <base>` only shows TRACKED changes, so the agent's new
+// files (its most common output) would be invisible and `nomos run --verify` would
+// see "nothing changed" on greenfield work. This stages the current working tree
+// into a THROWAWAY index (GIT_INDEX_FILE — the user's real index is untouched),
+// honoring .gitignore, then diffs it against the base. opts.numstat → per-file
+// churn. Returns the diff text, or null (not a git repo / no base).
+export function diffSince(root, baseSha, { numstat = false } = {}) {
+  if (!isGitRepo(root) || !baseSha) return null;
+  const idx = path.join(os.tmpdir(), `nomos-idx-${process.pid}-${Date.now()}`);
+  const env = { ...gitEnv(), GIT_INDEX_FILE: idx };
+  const run = (args) => execFileSync("git", args, { cwd: root, env, windowsHide: true, encoding: "utf8", maxBuffer: 16 * 1024 * 1024 });
+  try {
+    run(["read-tree", baseSha]);   // throwaway index = the base tree
+    run(["add", "-A", "."]);       // stage the current working tree (incl NEW files), .gitignore honored
+    return run(numstat ? ["diff", "--cached", "--numstat", baseSha] : ["diff", "--cached", baseSha]);
+  } catch { return null; }
+  finally { try { fs.unlinkSync(idx); } catch { /* best effort */ } }
 }
 
 // Take + persist a snapshot for an agent run. Returns the record or null.

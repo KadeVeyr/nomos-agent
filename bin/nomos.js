@@ -28,10 +28,10 @@ import { listModels, CURATED } from "../src/models.js";
 import { runCouncil } from "../src/council.js";
 import { renderReceipt, writeReceipt, verifyReceiptHash, receiptIssues, auditChain, headHash } from "../src/receipt.js";
 import { buildPolicy, policyFromEnv } from "../src/permissions.js";
-import { takeSnapshot, undo, captureState } from "../src/snapshot.js";
+import { takeSnapshot, undo, captureState, diffSince } from "../src/snapshot.js";
 import { startSession, loadSession, listSessions, appenderFor } from "../src/session.js";
 import { runSeat } from "../src/seat.js";
-import { getDiff, getNumstat, runVerify } from "../src/verify.js";
+import { getDiff, runVerify } from "../src/verify.js";
 import { parseNumstat, classifyChange } from "../src/risk.js";
 
 const argv = process.argv.slice(2);
@@ -148,14 +148,16 @@ async function cmdRun() {
 async function verifyRun({ root, snap, proposerSpec, maxTokens, json, explicit, mode, configVerifier }) {
   if (mode === "off") return null;
   const verifier = getFlag("--verifier", null) || configVerifier;
-  let diff = "";
-  try { diff = snap ? await getDiff({ root, against: snap.sha }) : await getDiff({ root }); } catch { return null; /* not a git repo */ }
+  // Diff everything the run changed since the pre-run snapshot, INCLUDING new files
+  // (diffSince stages untracked too — a plain `git diff` would miss greenfield work).
+  let diff = (snap ? diffSince(root, snap.sha) : null);
+  if (diff == null) { try { diff = await getDiff({ root }); } catch { return null; } } // fallback (no snapshot)
   if (!diff.trim()) { if (explicit && !json) process.stderr.write(`\x1b[2m  nothing changed to cross-check.\x1b[0m\n`); return null; }
   // `risky` mode: only cross-check ship-risk changes (a targeted heuristic, not a
   // safety guarantee — when in doubt, pass --verify).
   let riskReason = null;
   if (mode === "risky") {
-    let ns = ""; try { ns = snap ? await getNumstat({ root, against: snap.sha }) : await getNumstat({ root }); } catch { /* fall through */ }
+    const ns = (snap ? diffSince(root, snap.sha, { numstat: true }) : "") || "";
     const r = classifyChange(parseNumstat(ns));
     if (!r.risky) return null; // low-risk → quiet skip
     riskReason = r.reason;
