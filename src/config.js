@@ -22,12 +22,15 @@ const DEFAULTS = {
   allowFetch: false,
   maxSteps: 30,    // real coding tasks need many explore→edit→verify iterations
   maxTokens: 8192, // output-token cap: generous default, overridable; the old hardcoded 4096 truncated long outputs
+  verify: "off",   // auto cross-check after a run: "off" | "risky" (ship-risk changes) | "always"
+  verifier: null,  // provider/model that reviews (a DIFFERENT provider than the run model)
 };
 // Keys a repo-controlled project nomos.json may NOT set: capability flags
-// (would grant shell/network) AND defaultModel — a cloned repo must not get to
-// silently choose which provider your task + code + tool transcript egress to.
-// These come only from the user's global config, env, or an explicit CLI flag.
-const PROJECT_FORBIDDEN_KEYS = ["allowShell", "allowFetch", "defaultModel"];
+// (would grant shell/network), defaultModel, AND `verifier` — a cloned repo must
+// not get to silently choose which provider your task + code + tool transcript
+// egress to (the verifier sees the diff). `verify` mode + the rest come only from
+// the user's global config, env, or an explicit CLI flag.
+const PROJECT_FORBIDDEN_KEYS = ["allowShell", "allowFetch", "defaultModel", "verifier"];
 
 function readJson(p) {
   try { return JSON.parse(fs.readFileSync(p, "utf8")); } catch { return {}; }
@@ -48,6 +51,8 @@ export function loadConfig({ root = process.cwd(), cli = {} } = {}) {
   if (process.env.NOMOS_ALLOW_FETCH) env.allowFetch = process.env.NOMOS_ALLOW_FETCH === "true" || process.env.NOMOS_ALLOW_FETCH === "1";
   if (process.env.NOMOS_MAX_STEPS) env.maxSteps = Number(process.env.NOMOS_MAX_STEPS) || DEFAULTS.maxSteps;
   if (process.env.NOMOS_MAX_TOKENS) env.maxTokens = Number(process.env.NOMOS_MAX_TOKENS) || DEFAULTS.maxTokens;
+  if (process.env.NOMOS_VERIFY) env.verify = process.env.NOMOS_VERIFY;
+  if (process.env.NOMOS_VERIFIER) env.verifier = process.env.NOMOS_VERIFIER;
 
   const merged = { ...DEFAULTS, ...global, ...project, ...env };
   for (const k of Object.keys(cli)) if (cli[k] !== undefined && cli[k] !== null) merged[k] = cli[k];

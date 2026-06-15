@@ -31,7 +31,8 @@ import { buildPolicy, policyFromEnv } from "../src/permissions.js";
 import { takeSnapshot, undo, captureState } from "../src/snapshot.js";
 import { startSession, loadSession, listSessions, appenderFor } from "../src/session.js";
 import { runSeat } from "../src/seat.js";
-import { getDiff, runVerify } from "../src/verify.js";
+import { getDiff, getNumstat, runVerify } from "../src/verify.js";
+import { parseNumstat, classifyChange } from "../src/risk.js";
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -122,7 +123,9 @@ async function cmdRun() {
 
   try {
     const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, policy, headless: true, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, onEvent, onMessage: session.append });
-    const receipt = has("--verify") ? await verifyRun({ root: cfg.root, snap, proposerSpec: spec, maxTokens: cfg.maxTokens, json }) : null;
+    const explicit = has("--verify");
+    const vmode = explicit ? "explicit" : (cfg.verify || "off");
+    const receipt = (explicit || vmode !== "off") ? await verifyRun({ root: cfg.root, snap, proposerSpec: spec, maxTokens: cfg.maxTokens, json, explicit, mode: vmode, configVerifier: cfg.verifier }) : null;
     if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim(), session: session.id, receipt: receipt ? { id: receipt.id, verdict: receipt.verifier.verdict, cross_provider: receipt.cross_provider } : null }) + "\n"); return; }
     process.stdout.write("\n"); // streamed deltas already printed the answer
     const parts = [];
@@ -137,18 +140,37 @@ async function cmdRun() {
   }
 }
 
-// Opt-in cross-provider review of the change a `nomos run` just made: diff the
-// repo against the pre-run snapshot, have a DIFFERENT provider review it, write a
-// chained receipt, and render it honestly. Returns the receipt or null.
-async function verifyRun({ root, snap, proposerSpec, maxTokens, json }) {
-  const verifier = getFlag("--verifier", null);
-  if (!verifier) { if (!json) process.stderr.write(`\x1b[2m  --verify needs a second provider: add --verifier provider/model (a DIFFERENT provider than ${proposerSpec}).\x1b[0m\n`); return null; }
+// Cross-provider review of the change a `nomos run` just made. mode is "explicit"
+// (the user passed --verify: always run + STREAM the review), "risky" (auto-run
+// only for ship-risk changes, quiet), "always" (auto-run, quiet), or "off". Diffs
+// the repo against the pre-run snapshot, has a DIFFERENT provider review it, writes
+// a chained receipt, and renders it honestly. Returns the receipt or null.
+async function verifyRun({ root, snap, proposerSpec, maxTokens, json, explicit, mode, configVerifier }) {
+  if (mode === "off") return null;
+  const verifier = getFlag("--verifier", null) || configVerifier;
   let diff = "";
-  try { diff = snap ? await getDiff({ root, against: snap.sha }) : await getDiff({ root }); } catch { /* not a git repo */ }
-  if (!diff.trim()) { if (!json) process.stderr.write(`\x1b[2m  nothing changed to cross-check.\x1b[0m\n`); return null; }
-  if (!json) process.stderr.write(`\n\x1b[2m  △ ${verifier} is reviewing ${proposerSpec}'s work…\x1b[0m\n`);
+  try { diff = snap ? await getDiff({ root, against: snap.sha }) : await getDiff({ root }); } catch { return null; /* not a git repo */ }
+  if (!diff.trim()) { if (explicit && !json) process.stderr.write(`\x1b[2m  nothing changed to cross-check.\x1b[0m\n`); return null; }
+  // `risky` mode: only cross-check ship-risk changes (a targeted heuristic, not a
+  // safety guarantee — when in doubt, pass --verify).
+  let riskReason = null;
+  if (mode === "risky") {
+    let ns = ""; try { ns = snap ? await getNumstat({ root, against: snap.sha }) : await getNumstat({ root }); } catch { /* fall through */ }
+    const r = classifyChange(parseNumstat(ns));
+    if (!r.risky) return null; // low-risk → quiet skip
+    riskReason = r.reason;
+  }
+  if (!verifier) {
+    if (explicit && !json) process.stderr.write(`\x1b[2m  --verify needs a second provider: add --verifier provider/model (a DIFFERENT provider than ${proposerSpec}).\x1b[0m\n`);
+    else if (riskReason && !json) process.stderr.write(`\x1b[2m  △ this change ${riskReason} — set NOMOS_VERIFIER (or config) to auto cross-check it.\x1b[0m\n`);
+    return null;
+  }
+  if (!json) process.stderr.write(`\n\x1b[2m  △ ${verifier} is reviewing ${proposerSpec}'s work${riskReason ? ` (auto: ${riskReason})` : ""}…\x1b[0m\n`);
+  // Stream the review only when the user explicitly chose to watch (--verify) —
+  // auto (risky/always) verification stays quiet; the receipt is the trophy.
+  const onDelta = (explicit && !json) ? (t) => process.stderr.write(`\x1b[2m${t}\x1b[0m`) : null;
   try {
-    const { receipt } = await runVerify({ diff, spec: verifier, source: proposerSpec, proposerProvider: proposerSpec.split("/")[0], maxTokens, prev: headHash(root), codeSnapshot: captureState(root) });
+    const { receipt } = await runVerify({ diff, spec: verifier, source: proposerSpec, proposerProvider: proposerSpec.split("/")[0], maxTokens, prev: headHash(root), codeSnapshot: captureState(root), onDelta });
     writeReceipt(root, receipt);
     if (!json) process.stdout.write("\n" + renderReceipt(receipt) + "\n");
     return receipt;

@@ -5,7 +5,7 @@
 // second opinion, not the author.
 
 import { execFile } from "node:child_process";
-import { chat } from "./gateway.js";
+import { chat, chatStream } from "./gateway.js";
 import { resolveModel } from "./providers.js";
 import { parseVerdict } from "./council.js";
 import { makeReceipt } from "./receipt.js";
@@ -31,9 +31,25 @@ export function getDiff({ root = process.cwd(), staged = false, against = null }
   });
 }
 
-// Verify a diff with ONE model. Returns { receipt, verdict, reasoning }.
-export async function runVerify({ diff, spec, source = "your editor", proposerProvider = "external", timeoutMs = 120000, maxTokens, prev = null, codeSnapshot = null }, deps = {}) {
+// Per-file churn stats for the change to review (`git diff --numstat`), used to
+// classify ship-risk for the `verify = risky` mode.
+export function getNumstat({ root = process.cwd(), staged = false, against = null } = {}, deps = {}) {
+  const run = deps.execFile || execFile;
+  const args = against ? ["diff", "--numstat", against] : staged ? ["diff", "--numstat", "--cached"] : ["diff", "--numstat"];
+  return new Promise((resolve, reject) => {
+    run("git", args, { cwd: root, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => {
+      if (err) return reject(new Error("git diff --numstat failed — is this a git repository?"));
+      resolve(String(stdout || ""));
+    });
+  });
+}
+
+// Verify a diff with ONE model. Returns { receipt, verdict, reasoning }. If
+// `onDelta` is supplied, the verifier's review is STREAMED through it (the optional
+// "ceremony" — the receipt is still rendered at the end either way).
+export async function runVerify({ diff, spec, source = "your editor", proposerProvider = "external", timeoutMs = 120000, maxTokens, prev = null, codeSnapshot = null, onDelta = null }, deps = {}) {
   const _chat = deps.chat || chat;
+  const _chatStream = deps.chatStream || chatStream;
   const now = deps.now || (() => new Date().toISOString());
   const { providerId } = resolveModel(spec);
 
@@ -42,16 +58,13 @@ export async function runVerify({ diff, spec, source = "your editor", proposerPr
   const timer = setTimeout(() => { timed_out = true; controller.abort(); }, timeoutMs);
   let content;
   try {
-    const res = await _chat({
-      spec,
-      messages: [
-        { role: "system", content: VERIFY_SYSTEM },
-        { role: "user", content: `A change was produced by another tool (${source}). Review it independently.\n\nUNIFIED DIFF:\n${String(diff).slice(0, 60000)}` },
-      ],
-      tools: [],
-      signal: controller.signal,
-      maxTokens,
-    });
+    const messages = [
+      { role: "system", content: VERIFY_SYSTEM },
+      { role: "user", content: `A change was produced by another tool (${source}). Review it independently.\n\nUNIFIED DIFF:\n${String(diff).slice(0, 60000)}` },
+    ];
+    const res = typeof onDelta === "function"
+      ? await _chatStream({ spec, messages, tools: [], signal: controller.signal, maxTokens, onDelta })
+      : await _chat({ spec, messages, tools: [], signal: controller.signal, maxTokens });
     content = res?.content || "";
   } catch (e) {
     // Terminal-status guarantee (parity with runSeat): a verifier timeout or
