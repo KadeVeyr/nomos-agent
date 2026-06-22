@@ -129,6 +129,10 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
   let finalText = "";
   let streamOk = true; // fall back to non-streaming if a provider can't stream
   let lastFp = null, stuck = 0; // anti-loop: consecutive identical tool-turn fingerprints
+  // How the loop ends — a REAL signal for the verdict state machine, not a guess.
+  // Defaults to "exhausted": only reached if every step used tools to the cap.
+  let loopExit = "exhausted";
+  onEvent({ type: "state", state: "running" });
   for (let step = 0; step < maxSteps; step++) {
     trimContext(messages); // bound context growth on long runs
     let res;
@@ -153,6 +157,7 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
 
     if (!toolCalls || toolCalls.length === 0) {
       finalText = content || "";
+      loopExit = "done";
       logMsg({ role: "assistant", content: finalText }); // log the FINAL answer so a
       // completed session is detectable (last msg = assistant with no tool calls);
       // a step-capped run never logs this, so it stays resumable.
@@ -181,7 +186,7 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
       } catch (e) {
         result = `Tool error: ${e.message}`; // recover: the model sees the error and can adapt
       }
-      onEvent({ type: "tool_result", name: call.name, result: String(result).slice(0, 600) });
+      onEvent({ type: "tool_result", name: call.name, args: call.args, result: String(result).slice(0, 600) });
       return { call, result };
     };
     const results = await Promise.all(toolCalls.map(runOne));
@@ -196,6 +201,7 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
       logMsg(messages[messages.length - 1]);
     } else if (stuck >= STUCK_STOP) {
       finalText = (content ? content + "\n\n" : "") + `[nomos] Stopped early — repeated the same action(s) ${stuck + 1}× with no progress (stuck on: ${[...new Set(results.map((r) => r.call.name))].join(", ")}). Ending rather than exhausting the step budget; the work above may be incomplete.`;
+      loopExit = "stuck";
       logMsg({ role: "assistant", content: finalText });
       onEvent({ type: "error", message: "stuck — stopped early to avoid thrashing the step budget" });
       break;
@@ -203,6 +209,9 @@ export async function runAgent({ spec, task, root = process.cwd(), allowShell = 
     if (step === maxSteps - 1) finalText = content || "[nomos] Reached the step limit without a final answer.";
   }
 
+  // Terminal loop state on the one event spine — the verdict machine + the live
+  // surface read `loopExit` (done | stuck | exhausted) from this, not from prose.
+  onEvent({ type: "state", state: "loop_done", loopExit });
   logRun(root, { task, model: spec, result: finalText.slice(0, 2000), turns: messages.length });
   return finalText;
 }

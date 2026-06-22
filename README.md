@@ -1,8 +1,8 @@
 # Nomos
 
-**A coding agent for your terminal — that proves its work.** Bring your own model.
+**A coding agent for your terminal that doesn't ask you to trust it — it lets you replay the work.** Bring your own model.
 
-Nomos reads your code, edits it surgically, runs your tests, and shows its work — streaming, in your terminal — on **your own** model subscriptions or API keys. It's in the same category as OpenCode, Claude Code, and Hermes. The thing they don't do: Nomos can run a change past a **second, independent provider**, show you the review as it happens, and leave you a **tamper-evident, forensically auditable receipt** — so when something breaks three weeks from now, you can see exactly what was checked, by whom, against which code.
+Nomos reads your code, edits it surgically, runs your tests, and shows its work — streaming, in your terminal — on **your own** model subscriptions or API keys. Every run ends in a verdict — **PASS / HOLD / BLOCK** — computed from what actually happened (how the loop ended, tool failures, your test command's outcome, a second provider's review), **never from the agent's own say-so**. `nomos replay <id>` re-derives that verdict **offline**, from the logged events, with zero provider calls — and tells you if the log was altered. It's in the same category as OpenCode, Claude Code, and Hermes; the thing they don't do: Nomos can run a change past a **second, independent provider**, show you the review as it happens, and leave you a **tamper-evident, re-checkable receipt** — so when something breaks three weeks from now, you can see exactly what was checked, by whom, against which code.
 
 ```sh
 npm link                                   # make `nomos` a global command

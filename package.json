@@ -8,7 +8,7 @@
   },
   "scripts": {
     "start": "node bin/nomos.js",
-    "test": "node --test test/tools.test.mjs test/core.test.mjs test/auth.test.mjs test/stream.test.mjs test/verify.test.mjs test/gateway.test.mjs test/mcp.test.mjs test/permissions.test.mjs test/snapshot.test.mjs test/session.test.mjs test/risk.test.mjs test/verify-wiring.test.mjs"
+    "test": "node --test test/tools.test.mjs test/core.test.mjs test/auth.test.mjs test/stream.test.mjs test/verify.test.mjs test/gateway.test.mjs test/mcp.test.mjs test/permissions.test.mjs test/snapshot.test.mjs test/session.test.mjs test/risk.test.mjs test/verify-wiring.test.mjs test/verdict.test.mjs"
   },
   "engines": {
     "node": ">=18"

@@ -33,6 +33,7 @@ import { startSession, loadSession, listSessions, appenderFor } from "../src/ses
 import { runSeat } from "../src/seat.js";
 import { getDiff, runVerify } from "../src/verify.js";
 import { parseNumstat, classifyChange } from "../src/risk.js";
+import { newRunSignals, foldEvent, runSummary, computeVerdict } from "../src/verdict.js";
 
 const argv = process.argv.slice(2);
 const has = (f) => argv.includes(f);
@@ -70,7 +71,7 @@ async function cmdRun() {
   const cfg = loadConfig({ cli: { allowShell: has("--allow-shell") ? true : undefined, allowFetch: has("--allow-fetch") ? true : undefined, maxTokens: getInt("--max-tokens") } });
   const spec = getFlag("--model", "-m") || cfg.defaultModel;
   const json = has("--json");
-  const skip = new Set(["run", "--json", "--allow-shell", "--allow-fetch", "--verify"]);
+  const skip = new Set(["run", "--json", "--allow-shell", "--allow-fetch", "--verify", "--plan"]);
   const parts = [];
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -82,6 +83,15 @@ async function cmdRun() {
   if (!task) task = await readStdin(); // pipeable: echo "task" | nomos run -m model
   if (!spec) return fail('No model. Use -m provider/model, or set defaultModel in nomos.json.');
   if (!task) return fail('Missing task. Usage: nomos run -m provider/model "task"');
+
+  // Plan-first: a VISIBLE work loop. The agent opens with a short numbered plan,
+  // then carries it out — the plan streams as the first output. Headless never
+  // blocks for approval; --plan (or `plan:true` in nomos.json).
+  const planMode = has("--plan") || cfg.plan === true;
+  if (planMode) task = `${task}\n\n[PLAN-FIRST: open your reply with a SHORT numbered plan (3-6 steps) of what you'll change and how you'll verify it, then carry it out.]`;
+  // The project's declared test command — so a real test pass/fail feeds the verdict.
+  let testCmd = null;
+  try { testCmd = JSON.parse(readFileSync(path.join(cfg.root, "nomos.json"), "utf8"))?.commands?.test || null; } catch { /* none */ }
 
   // Per-tool permission policy. CLI --allow/--deny <class> (repeatable) + the
   // legacy --allow-shell/--allow-fetch + NOMOS_POLICY_<CLASS> env; the project's
@@ -108,8 +118,13 @@ async function cmdRun() {
   if (!json) process.stderr.write(`\x1b[2m  session ${session.id} · \`nomos resume ${session.id}\` if interrupted\x1b[0m\n`);
   const t0 = Date.now();
   const counts = { read: 0, edit: 0, write: 0, shell: 0, other: 0 };
+  // The ONE event spine drives BOTH the live display AND the verdict signals —
+  // PASS/HOLD/BLOCK is FOLDED from real tool/test/loop events, never model prose.
+  const sig = newRunSignals();
   const onEvent = (e) => {
+    foldEvent(sig, e, testCmd);
     if (e.type === "delta") { if (!json) process.stdout.write(e.text); }
+    else if (e.type === "state") { if (!json && e.state === "running" && planMode) process.stderr.write(`\x1b[2m  planning…\x1b[0m\n`); }
     else if (e.type === "tool_call") {
       const n = e.name;
       if (n === "read_file") counts.read++; else if (n === "edit_file" || n === "multi_edit") counts.edit++;
@@ -121,23 +136,61 @@ async function cmdRun() {
     else if (e.type === "error") process.stderr.write(`\x1b[31m· error: ${e.message}\x1b[0m\n`);
   };
 
+  // Ctrl+C aborts cleanly. The session log is append-only (a torn last line is
+  // treated as EOF on resume + the dangling turn reconciled away), so an interrupt
+  // can never corrupt it — the run becomes a resumable/refinable HOLD.
+  const controller = new AbortController();
+  const onSigint = () => controller.abort();
+  process.once("SIGINT", onSigint);
   try {
-    const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, policy, headless: true, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, onEvent, onMessage: session.append });
+    const result = await runAgent({ spec, task, root: cfg.root, allowShell: cfg.allowShell, allowFetch: cfg.allowFetch, policy, headless: true, maxSteps: cfg.maxSteps, maxTokens: cfg.maxTokens, onEvent, onMessage: session.append, signal: controller.signal });
     const explicit = has("--verify");
     const vmode = explicit ? "explicit" : (cfg.verify || "off");
     const receipt = (explicit || vmode !== "off") ? await verifyRun({ root: cfg.root, snap, proposerSpec: spec, maxTokens: cfg.maxTokens, json, explicit, mode: vmode, configVerifier: cfg.verifier }) : null;
-    if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim(), session: session.id, receipt: receipt ? { id: receipt.id, verdict: receipt.verifier.verdict, cross_provider: receipt.cross_provider } : null }) + "\n"); return; }
+    // Fold the cross-provider verdict into the signals so PASS requires a real check.
+    if (receipt) foldEvent(sig, { type: "verdict", verdict: receipt.verifier?.verdict, independent: receipt.cross_provider }, testCmd);
+    const summary = runSummary(sig);
+    // Persist the event-derived verdict so `nomos replay`/resume re-derives it offline.
+    session.append({ type: "verdict", verdict: summary.verdict, reason: summary.reason, signals: sig, ms: Date.now() - t0 });
+    if (json) { process.stdout.write(JSON.stringify({ ok: true, model: spec, result: (result || "").trim(), session: session.id, verdict: summary.verdict, reason: summary.reason, changed: summary.changed, tested: summary.tested, unverified: summary.unverified, receipt: receipt ? { id: receipt.id, verdict: receipt.verifier.verdict, cross_provider: receipt.cross_provider } : null }) + "\n"); return; }
     process.stdout.write("\n"); // streamed deltas already printed the answer
-    const parts = [];
-    if (counts.read) parts.push(`${counts.read} read`);
-    if (counts.edit) parts.push(`${counts.edit} edit`);
-    if (counts.write) parts.push(`${counts.write} write`);
-    if (counts.shell) parts.push(`${counts.shell} shell`);
-    process.stderr.write(`\x1b[2m──\x1b[0m \x1b[32m✓ done\x1b[0m \x1b[2min ${((Date.now() - t0) / 1000).toFixed(1)}s${parts.length ? " · " + parts.join(", ") : ""}\x1b[0m\n`);
+    renderChangedFiles(cfg.root, snap); // the inspect leg, made visible (diff-first)
+    renderVerdict(summary, Date.now() - t0);
   } catch (e) {
-    if (json) { process.stdout.write(JSON.stringify({ ok: false, model: spec, error: e.message }) + "\n"); process.exitCode = 1; }
+    if (e?.name === "AbortError") {
+      session.append({ type: "verdict", verdict: "HOLD", reason: "interrupted (Ctrl+C) before completion", signals: sig, ms: Date.now() - t0 });
+      if (json) { process.stdout.write(JSON.stringify({ ok: false, model: spec, verdict: "HOLD", reason: "interrupted", session: session.id }) + "\n"); process.exitCode = 130; }
+      else process.stderr.write(`\n\x1b[33m■ HOLD\x1b[0m \x1b[2m· interrupted — resume with \`nomos resume ${session.id}\`, or refine the task and re-run\x1b[0m\n`);
+    } else if (json) { process.stdout.write(JSON.stringify({ ok: false, model: spec, error: e.message }) + "\n"); process.exitCode = 1; }
     else fail(e.message);
+  } finally {
+    process.removeListener("SIGINT", onSigint);
   }
+}
+
+// The run verdict, rendered from EVENT-DERIVED signals (never model prose). No
+// green ✓ — that glyph is reserved for the cryptographic hash-match; a run verdict
+// is a scoped state, shown with what changed / what was tested / what's unverified.
+function renderVerdict(summary, ms) {
+  const { verdict, reason, changed, tested, unverified } = summary;
+  const mark = verdict === "PASS" ? "\x1b[32m● PASS\x1b[0m" : verdict === "BLOCK" ? "\x1b[31m✕ BLOCK\x1b[0m" : "\x1b[33m■ HOLD\x1b[0m";
+  process.stderr.write(`\x1b[2m──\x1b[0m ${mark} \x1b[2m· ${reason} · ${(ms / 1000).toFixed(1)}s\x1b[0m\n`);
+  process.stderr.write(`  \x1b[2mchanged:\x1b[0m ${changed}   \x1b[2mtested:\x1b[0m ${tested}\n`);
+  if (unverified.length) process.stderr.write(`  \x1b[33munverified:\x1b[0m \x1b[2m${unverified.join("; ")}\x1b[0m\n`);
+}
+
+// Diff-first: the changed files + churn, from the pre-run snapshot. Devs trust diffs.
+function renderChangedFiles(root, snap) {
+  if (!snap?.sha) return;
+  let ns; try { ns = diffSince(root, snap.sha, { numstat: true }); } catch { return; }
+  const lines = String(ns || "").trim().split("\n").filter(Boolean);
+  if (!lines.length) return;
+  process.stderr.write(`\x1b[2m──\x1b[0m \x1b[1mchanged\x1b[0m \x1b[2m(${lines.length} file${lines.length > 1 ? "s" : ""})\x1b[0m\n`);
+  for (const l of lines.slice(0, 20)) {
+    const [add, del, file] = l.split("\t");
+    process.stderr.write(`  \x1b[32m+${add}\x1b[0m \x1b[31m-${del}\x1b[0m \x1b[2m${file}\x1b[0m\n`);
+  }
+  if (lines.length > 20) process.stderr.write(`  \x1b[2m… ${lines.length - 20} more\x1b[0m\n`);
 }
 
 // Cross-provider review of the change a `nomos run` just made. mode is "explicit"
@@ -228,6 +281,35 @@ function cmdSessions() {
   const rows = listSessions();
   if (!rows.length) { process.stdout.write("No sessions yet.\n"); return; }
   for (const r of rows) process.stdout.write(`${r.done ? "\x1b[2m✓\x1b[0m" : "\x1b[33m…\x1b[0m"} \x1b[1m${r.id}\x1b[0m \x1b[2m${r.turns} turns\x1b[0m  ${r.task}\n`);
+}
+
+// nomos replay <id> — re-render a past run + its verdict entirely OFFLINE (zero
+// provider calls). The verdict is RE-DERIVED from the logged signals via the same
+// pure state machine, so a replay proves the verdict was event-derived and
+// deterministic — not a stored sentence a model wrote about itself.
+function cmdReplay() {
+  const id = argv[1];
+  if (!id) return fail("Usage: nomos replay <session-id>  (offline — re-renders a run + its verdict, no provider call)");
+  const s = loadSession(id);
+  if (!s) return fail(`No session ${id} — try \`nomos sessions\`.`);
+  process.stdout.write(`\x1b[1m${s.id}\x1b[0m \x1b[2m· ${s.spec || "?"}\x1b[0m\n`);
+  process.stdout.write(`\x1b[2mtask:\x1b[0m ${String(s.task || "").replace(/\n[\s\S]*$/, " …").slice(0, 200)}\n`);
+  const tally = {};
+  for (const m of s.messages) for (const tc of (m.toolCalls || [])) tally[tc.name] = (tally[tc.name] || 0) + 1;
+  const steps = Object.entries(tally).map(([n, c]) => `${c} ${n}`).join(", ");
+  process.stdout.write(`\x1b[2msteps:\x1b[0m ${s.messages.length} messages${steps ? " · " + steps : ""}\n`);
+  if (s.verdict) {
+    const stored = s.verdict;
+    const re = stored.signals ? computeVerdict(stored.signals) : null; // re-derive offline
+    const v = re?.verdict || stored.verdict;
+    const reason = re?.reason || stored.reason;
+    const mark = v === "PASS" ? "\x1b[32m● PASS\x1b[0m" : v === "BLOCK" ? "\x1b[31m✕ BLOCK\x1b[0m" : "\x1b[33m■ HOLD\x1b[0m";
+    process.stdout.write(`\x1b[2m──\x1b[0m ${mark} \x1b[2m· ${reason}\x1b[0m\n`);
+    if (re && re.verdict !== stored.verdict) process.stdout.write(`\x1b[31m⚠ re-derived (${re.verdict}) ≠ logged (${stored.verdict}) — the log was altered\x1b[0m\n`);
+    process.stdout.write(`\x1b[2m  re-derived offline from logged events · no provider call\x1b[0m\n`);
+  } else {
+    process.stdout.write(`\x1b[2m${s.done ? "completed" : "incomplete / interrupted"} — no verdict recorded\x1b[0m\n`);
+  }
 }
 
 function cmdStatus() {
@@ -621,6 +703,7 @@ else if (cmd === "audit") cmdAudit();
 else if (cmd === "undo") cmdUndo();
 else if (cmd === "resume") await cmdResume();
 else if (cmd === "sessions") cmdSessions();
+else if (cmd === "replay") cmdReplay();
 else if (cmd === "status") cmdStatus();
 else if (cmd === "mcp") await cmdMcp();
 else if (cmd === "auth") await cmdAuth();

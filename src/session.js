@@ -70,19 +70,20 @@ export function loadSession(id) {
   const file = path.join(sessionsDir(), id.endsWith(".jsonl") ? id : id + ".jsonl");
   let raw;
   try { raw = fs.readFileSync(file, "utf8"); } catch { return null; }
-  let meta = null; const messages = []; let doneRecord = false;
+  let meta = null; const messages = []; let doneRecord = false; let verdict = null;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let rec; try { rec = JSON.parse(line); } catch { break; } // first torn line = EOF
     if (rec.type === "meta") meta = rec;
     else if (rec.type === "done") doneRecord = true;
+    else if (rec.type === "verdict") verdict = rec; // the event-derived run verdict (offline replay reads this)
     else if (rec.type === "msg" && rec.role) messages.push({ role: rec.role, content: rec.content ?? "", ...(rec.toolCalls ? { toolCalls: rec.toolCalls } : {}), ...(rec.toolCallId ? { toolCallId: rec.toolCallId } : {}) });
   }
   if (!meta) return null;
   const reconciled = reconcile(messages);
   const last = reconciled[reconciled.length - 1];
   const done = doneRecord || (last && last.role === "assistant" && !(last.toolCalls && last.toolCalls.length));
-  return { id: meta.id, file, spec: meta.spec, task: meta.task, root: meta.root, system: meta.system, messages: reconciled, done };
+  return { id: meta.id, file, spec: meta.spec, task: meta.task, root: meta.root, system: meta.system, messages: reconciled, done, verdict };
 }
 
 // Recent sessions, newest first: { id, task, turns, when, done }.
