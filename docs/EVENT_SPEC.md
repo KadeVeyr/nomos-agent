@@ -33,9 +33,11 @@ The run-level verdict — `PASS` / `HOLD` / `BLOCK` — is NOT a model opinion. 
 computed deterministically by folding the event stream above through the pure
 state machine in `src/verdict.js` (`foldEvent` → `computeVerdict`):
 
-- **PASS** — the loop ended `done` AND either nothing was changed or a REAL
-  positive check confirmed it (cross-provider verifier `PASS`, or the project's
-  test command ran green) AND no negatives were seen.
+- **PASS** — the loop ended `done` AND either nothing was changed or a REAL,
+  independent positive check confirmed it (cross-provider verifier `PASS`, or the
+  project's test command ran green *without the run having edited the test files* —
+  a run that rewrites its own tests can't earn PASS from "green" alone, only from
+  the verifier) AND no negatives were seen.
 - **HOLD** — could not be confirmed: `loopExit` was `exhausted` or `stuck`, the
   verifier raised `CONCERNS`, or code changed but was never independently
   verified/tested. (Step-exhaustion is HOLD, never a silent success.)
@@ -47,7 +49,7 @@ It is written to the session log as one record:
 ```json
 { "type": "verdict", "verdict": "PASS|HOLD|BLOCK", "reason": "...",
   "signals": { "loopExit": "done", "edits": 2, "toolErrors": 0,
-               "testRan": true, "testFailed": false,
+               "testRan": true, "testFailed": false, "testsEdited": false,
                "verifier": "PASS", "verifierIndependent": true }, "ms": 12345 }
 ```
 

@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import {
-  newRunSignals, foldEvent, computeVerdict, verdictFromEvents, runSummary, isErrorResult, VERDICTS,
+  newRunSignals, foldEvent, computeVerdict, verdictFromEvents, runSummary, isErrorResult, isTestFile, VERDICTS,
 } from "../src/verdict.js";
 import { startSession, loadSession } from "../src/session.js";
 
@@ -170,6 +170,49 @@ test("a run's verdict round-trips through the session log and re-derives offline
   } finally {
     if (prevXdg === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = prevXdg;
   }
+});
+
+// ── the test-gaming guard (Kimi 2.7's catch): a run that edits its own tests
+//    cannot earn PASS from "tests green" alone — that's not an independent check ──
+test("isTestFile recognises the common test-file conventions across ecosystems", () => {
+  for (const p of [
+    "sum.test.js", "src/auth/verifyToken.spec.ts", "tests/auth.test.mjs", "__tests__/x.js",
+    "test_foo.py", "foo_test.go", "spec/models_spec.rb", "foo.test.tsx", "vitest/x.spec.ts",
+    "src/CalculatorTest.java", "src/CalculatorTests.java",        // JUnit (camelCase + plural)
+    "Calculator.Tests.cs", "CalculatorTests.cs",                  // .NET
+    "calculator_tests.rb",                                        // ruby plural
+    "src/main/java/com/x/FooTest.java", "lib\\Bar.Spec.cs",       // nested + backslash
+  ]) assert.ok(isTestFile(p), `should flag ${p}`);
+  // Regression: words ending in "test" must NOT be mistaken for test files.
+  for (const p of ["sum.js", "src/index.ts", "README.md", "contest.js", "latest.py", "latest.java", "contest.cs", "greatest.go", "manifest.json"])
+    assert.ok(!isTestFile(p), `should NOT flag ${p}`);
+  // ACCEPTED over-fire (pinned): a Capitalised non-test production name ending in
+  // Test/Spec flags too — inseparable from a real FooTest by path, and safe-direction
+  // (forces HOLD, never a gamed PASS). Locked so a future "fix" can't silently change it.
+  for (const p of ["src/AbTest.java", "src/ProductSpec.ts"])
+    assert.ok(isTestFile(p), `accepted safe-direction over-fire: ${p}`);
+});
+test("foldEvent flags testsEdited when an edit touches a test file", () => {
+  const s = newRunSignals();
+  foldEvent(s, { type: "tool_call", name: "edit_file", args: { path: "src/sum.js" } });
+  assert.equal(s.testsEdited, false);
+  foldEvent(s, { type: "tool_call", name: "edit_file", args: { path: "sum.test.js" } });
+  assert.equal(s.testsEdited, true);
+  assert.equal(s.edits, 2);
+});
+test("editing the test + green tests + no verifier → HOLD, not a gamed PASS", () => {
+  // The exact attack: agent deletes a check AND rewrites the test to expect the bug.
+  const s = sig({ loopExit: "done", edits: 2, testRan: true, testFailed: false, testsEdited: true, verifier: null });
+  assert.equal(computeVerdict(s).verdict, "HOLD");
+  assert.ok(runSummary(s).unverified.some((u) => /test files were edited/.test(u)));
+});
+test("editing the test + green tests + an independent verifier PASS → PASS (the verifier confirms the real diff)", () => {
+  const s = sig({ loopExit: "done", edits: 2, testRan: true, testFailed: false, testsEdited: true, verifier: "PASS" });
+  assert.equal(computeVerdict(s).verdict, "PASS");
+});
+test("editing the test that then FAILS is still a BLOCK", () => {
+  const s = sig({ loopExit: "done", edits: 1, testRan: true, testFailed: true, testsEdited: true });
+  assert.equal(computeVerdict(s).verdict, "BLOCK");
 });
 
 test("isErrorResult matches the agent's error grammar", () => {

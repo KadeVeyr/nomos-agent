@@ -33,12 +33,40 @@ export function newRunSignals() {
     toolErrors: 0,             // tool_result events classified as failures (unrecovered)
     testRan: false,            // the project's declared test command was executed
     testFailed: null,          // true/false once a test command ran; null if none ran
+    testsEdited: false,        // the run edited a TEST file — so "tests green" isn't an independent check
     verifier: null,            // "PASS" | "CONCERNS" | "FAIL" | null — cross-provider verdict
     verifierIndependent: null, // true if cross-provider; false if same-provider; null if none
   };
 }
 
 const EDIT_TOOLS = new Set(["write_file", "edit_file", "multi_edit"]);
+
+// Is this path a TEST file? If a run edits its own tests, "tests green" is no
+// longer an independent check (the agent could rewrite a test to expect the bug),
+// so it can't confirm a PASS on its own. Covers the common conventions across
+// ecosystems (jest/vitest, pytest, go, ruby, JUnit, .NET).
+// KNOWN STRUCTURAL GAP: in-SOURCE tests (Rust `#[cfg(test)] mod tests`, Python
+// doctests) live in the production file and share its path — no path signal can
+// see them, so `src/x.rs` stays NOT-a-test. For those ecosystems the test-edit
+// guard is blind; PASS should lean on the cross-provider verifier. (A future
+// diff-hunk scan for `#[test]`/`def test_` would close it — out of scope here.)
+export function isTestFile(p) {
+  const raw = String(p || "").replace(/\\/g, "/");
+  if (!raw) return false;
+  const s = raw.toLowerCase();
+  return /(^|\/)(__tests__|tests?|specs?)\//.test(s)        // inside a test/ spec/ __tests__/ dir
+    || /\.(test|spec|tests|specs)\.[a-z0-9]+$/.test(s)      // foo.test.js, foo.spec.ts, foo.tests.cs
+    || /(^|\/)test_[^/]+\.[a-z0-9]+$/.test(s)               // test_foo.py
+    || /_tests?\.[a-z0-9]+$/.test(s)                        // foo_test.go, foo_tests.rb
+    // camelCase / plural suffix on the basename (JUnit FooTest.java, .NET FooTests.cs,
+    // Foo.Tests.cs). Case-SENSITIVE on the original path: the capital `Test` is the
+    // camelCase signal, and it excludes lowercase "latest"/"contest"/"greatest".
+    // ACCEPTED OVER-FIRE: a Capitalised non-test name ending in Test/Spec (AbTest.java,
+    // ProductSpec.ts) flags too — inseparable from a real FooTest by path alone, and
+    // SAFE-DIRECTION (it only removes "tests green" as a confirmation → at worst a
+    // spurious HOLD, NEVER a gamed PASS). We accept it rather than miss FooTest.
+    || /(Test|Tests|Spec|Specs)\.[A-Za-z0-9]+$/.test(raw);
+}
 // Mirrors agent.js classifyResult's error grammar: an error-classified tool result.
 const ERROR_RE = /^(Tool error|Permission denied|Unknown tool|Missing required|git .*failed|Command failed)|\bfailed:/;
 export function isErrorResult(s) { return ERROR_RE.test(String(s == null ? "" : s)); }
@@ -62,7 +90,10 @@ export function foldEvent(sig, ev, testCmd = null) {
   if (!sig || !ev || typeof ev !== "object") return sig;
   switch (ev.type) {
     case "tool_call":
-      if (EDIT_TOOLS.has(ev.name)) sig.edits++;
+      if (EDIT_TOOLS.has(ev.name)) {
+        sig.edits++;
+        if (isTestFile(ev.args && ev.args.path)) sig.testsEdited = true;
+      }
       break;
     case "tool_result": {
       const failed = isErrorResult(ev.result);
@@ -89,8 +120,11 @@ export function computeVerdict(sig) {
   // Plain-English conditions, so each rule below reads like a sentence.
   const completed = s.loopExit === "done";        // the loop produced a final answer
   const verifierPassed = s.verifier === "PASS";   // a different provider reviewed it and agreed
-  const testsPassed = s.testFailed === false;     // the project's test command ran green
-  const confirmed = verifierPassed || testsPassed; // a REAL positive check happened
+  // Tests confirm PASS only if the run did NOT edit the test files — otherwise
+  // "green" may just mean the agent rewrote the tests to expect the bug. A
+  // cross-provider verifier (an independent read of the diff) still confirms.
+  const testsPassed = s.testFailed === false && !s.testsEdited;
+  const confirmed = verifierPassed || testsPassed; // a REAL, independent positive check happened
 
   // BLOCK — a real negative was observed.
   if (s.verifier === "FAIL") return { verdict: "BLOCK", reason: "the cross-provider verifier FAILED the change" };
@@ -129,9 +163,10 @@ export function runSummary(sig) {
   const s = sig || newRunSignals();
   const { verdict, reason } = computeVerdict(s);
   const changed = s.edits > 0 ? `${s.edits} edit${s.edits > 1 ? "s" : ""}` : "no code changes";
-  const tested = s.testRan ? (s.testFailed ? "tests FAILED" : "tests passed") : "tests not run";
+  const tested = s.testRan ? (s.testFailed ? "tests FAILED" : s.testsEdited ? "tests passed (but edited this run)" : "tests passed") : "tests not run";
   const unverified = [];
   if (s.edits > 0 && s.verifier !== "PASS") unverified.push("changes not confirmed by a cross-provider review");
+  if (s.testsEdited && s.verifier !== "PASS") unverified.push("test files were edited this run — passing tests are not an independent check");
   if (s.edits > 0 && !s.testRan) unverified.push("no test command was run");
   if (s.loopExit === "exhausted") unverified.push("agent did not finish within the step budget");
   if (s.loopExit === "stuck") unverified.push("agent stopped early (stuck)");
